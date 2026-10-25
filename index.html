@@ -231,10 +231,10 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     recent.push(freq);
     if (recent.length > 5) recent.shift();
     if (recent.length < 5) return;
-    const freq = median(recent);
+    const medFreq = median(recent);
     const spoken = instrument === "ukulele"
-      ? TalkingTuner.describeUkulele(freq)
-      : TalkingTuner.describeGuitar(freq);
+      ? TalkingTuner.describeUkulele(medFreq)
+      : TalkingTuner.describeGuitar(medFreq);
     const now = Date.now();
     if (spoken.indexOf("in tune") !== -1) {
       // Ding once per string when it comes in tune, then stay quiet
@@ -259,14 +259,17 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
   startBtn.addEventListener("click", async function () {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       setStatus("Microphone unavailable: this page needs a secure connection (HTTPS).");
+      speak("Microphone unavailable. This page needs a secure connection.");
       return;
     }
     setStatus("Asking for the microphone…");
+    speak("Asking for the microphone.");
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: {
         echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
     } catch (e) {
       setStatus("Microphone unavailable: " + e.message);
+      speak("Microphone unavailable. " + e.message);
       return;
     }
     ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -277,6 +280,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     src.connect(analyser);
     recent = []; lastSpoken = ""; lastAt = 0; lastDinged = null;
     setStatus("Listening… play a string.");
+    speak("Listening. Play a string.");
     timer = setInterval(tick, 100);
     startBtn.disabled = true;
     stopBtn.disabled = false;
