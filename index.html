@@ -23,6 +23,13 @@ is low or high, for example “low E string, low”. When the string
 comes in tune, the phone dings and says so. Everything runs on the
 phone. Nothing is sent anywhere.</p>
 <p>
+  <button id="copyLink" aria-label="Copy tuner link">Copy tuner link</button>
+</p>
+<p class="note">If this page opened inside another app and the tuner cannot
+hear you, tap Copy tuner link, then say “Hey Siri, open Safari”,
+tap the address bar, and choose Paste and Go. The tuner needs real
+Safari to hear the microphone.</p>
+<p>
   <button id="guitarBtn" aria-label="Guitar" aria-pressed="true">Guitar</button>
   <button id="ukeBtn" aria-label="Tenor ukulele" aria-pressed="false">Tenor ukulele</button>
 </p>
@@ -334,6 +341,38 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     setStatus("Stopped.");
     startBtn.disabled = false;
     stopBtn.disabled = true;
+  });
+  // Escape hatch for in-app viewers: a page cannot open itself in
+  // Safari, but it can copy its own address, so the user can paste
+  // it into Safari. Modern clipboard first, old execCommand fallback.
+  const copyBtn = document.getElementById("copyLink");
+  copyBtn.addEventListener("click", async function () {
+    const url = window.location.href;
+    let copied = false;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(url);
+        copied = true;
+      }
+    } catch (e) { /* fall through to the older method */ }
+    if (!copied) {
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = url;
+        ta.style.position = "fixed"; ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        copied = document.execCommand("copy");
+        document.body.removeChild(ta);
+      } catch (e) { copied = false; }
+    }
+    if (copied) {
+      setStatus("Link copied. Open Safari and paste it into the address bar.");
+      speak("Link copied. Open Safari and paste it into the address bar.");
+    } else {
+      setStatus("Copy failed. The address is: " + url);
+      speak("Copy failed.");
+    }
   });
 </script>
 </body>
