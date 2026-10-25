@@ -29,7 +29,7 @@ phone. Nothing is sent anywhere.</p>
 hear you, tap Copy tuner link, then say “Hey Siri, open Safari”,
 tap the address bar, and choose Paste and Go. The tuner needs real
 Safari to hear the microphone.</p>
-<p class="note" id="buildTag">Talking Tuner, build 9.</p>
+<p class="note" id="buildTag">Talking Tuner, build 10.</p>
 <p>
   <button id="guitarBtn" aria-label="Guitar" aria-pressed="true">Guitar</button>
   <button id="ukeBtn" aria-label="Tenor ukulele" aria-pressed="false">Tenor ukulele</button>
@@ -39,6 +39,7 @@ Safari to hear the microphone.</p>
   <button id="start" aria-label="Start listening">Start listening</button>
   <button id="stop" aria-label="Stop listening" disabled>Stop</button>
   <button id="levelBtn" aria-label="Check microphone level">Check microphone level</button>
+  <button id="logBtn" aria-label="Copy diagnostic log">Copy diagnostic log</button>
 </p>
 <p id="status" role="status">Not listening yet.</p>
 <p id="reading" aria-label="Last reading"></p>
@@ -198,7 +199,17 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
   let ctx = null, analyser = null, stream = null, timer = null;
   let recent = [], lastSpoken = "", lastAt = 0, lastDinged = null;
   let listenStartedAt = 0, heardSound = false, silenceAnnounced = false, noPitchAnnounced = false;
-  let peakRms = 0;
+  let peakRms = 0, tickCount = 0;
+  // Diagnostic log: what happened, in order, so Buck can paste it
+  // to Muse instead of relaying spoken numbers. No audio is stored,
+  // only short text lines; nothing leaves the phone except the paste.
+  const diagLog = [];
+  function logEvent(text) {
+    const t = new Date().toISOString().slice(11, 19);
+    diagLog.push(t + " " + text);
+    if (diagLog.length > 300) diagLog.shift();
+  }
+  logEvent("page loaded, build 10, " + navigator.userAgent);
 
   function setStatus(text) { statusEl.textContent = text; }
   function median(arr) {
@@ -237,13 +248,16 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
       silenceAnnounced = true;
       setStatus("Microphone is on, but I hear silence. Loudest level so far: " + peakRms.toFixed(4) + ".");
       speak("Microphone is on, but I hear silence. Loudest level so far: " + peakRms.toFixed(4) + ".");
+      logEvent("diagnostic: silence, peak " + peakRms.toFixed(4));
     } else if (!noPitchAnnounced && heardSound && elapsed > 5000) {
       noPitchAnnounced = true;
       setStatus("I hear sound, but I cannot find a pitch.");
       speak("I hear sound, but I cannot find a pitch.");
+      logEvent("diagnostic: sound without pitch, peak " + peakRms.toFixed(4));
     }
   }
   function tick() {
+    tickCount++;
     let data;
     if (analyser.getFloatTimeDomainData) {
       data = new Float32Array(analyser.fftSize);
@@ -258,6 +272,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     for (let i = 0; i < data.length; i++) ss += data[i] * data[i];
     const tickRms = Math.sqrt(ss / data.length);
     if (tickRms > peakRms) peakRms = tickRms;
+    if (tickCount % 50 === 0) logEvent("listening, peak " + peakRms.toFixed(4));
     if (tickRms >= 0.01) heardSound = true;
     const freq = TalkingTuner.estimatePitch(data, ctx.sampleRate);
     if (freq === null) { maybeAnnounceDiagnostics(); return; }
@@ -283,6 +298,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
         playDing();
         readingEl.textContent = spoken;
         speak(spoken);
+        logEvent("says: " + spoken);
         lastDinged = stringLabel;
       }
     } else {
@@ -294,6 +310,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
       if ((spoken !== lastSpoken || now - lastAt > 2500) && now - lastAt > 800) {
         readingEl.textContent = spoken;
         speak(spoken);
+        logEvent("says: " + spoken);
         lastSpoken = spoken;
         lastAt = now;
       }
@@ -327,12 +344,15 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
       try {
         stream = await navigator.mediaDevices.getUserMedia({ audio: {
           echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+        logEvent("mic granted, clean input (processing off)");
       } catch (e) {
         stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        logEvent("mic granted, plain audio fallback (strict set rejected)");
       }
     } catch (e) {
       setStatus("Microphone unavailable: " + e.message);
       speak("Microphone unavailable. " + e.message);
+      logEvent("mic FAILED: " + e.message);
       try { ctx.close(); } catch (e2) {}
       ctx = null; analyser = null;
       return;
@@ -340,6 +360,14 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     if (ctx.resume) ctx.resume();
     const src = ctx.createMediaStreamSource(stream);
     src.connect(analyser);
+    try {
+      const tr = stream.getAudioTracks()[0];
+      const st = tr.getSettings ? tr.getSettings() : {};
+      logEvent("track: label=" + tr.label + ", state=" + tr.readyState + ", muted=" + tr.muted +
+        ", sampleRate=" + (st.sampleRate || "?") + ", channels=" + (st.channelCount || "?") +
+        ", echo=" + st.echoCancellation + ", noise=" + st.noiseSuppression + ", gain=" + st.autoGainControl +
+        ", context=" + ctx.state + ", engineRate=" + ctx.sampleRate);
+    } catch (e) { logEvent("track info unavailable: " + e.message); }
     // Safari only renders the graph if it reaches the destination.
     // A zero-gain link keeps the mic silent while letting the
     // analyser actually receive data; without it the analyser can
@@ -363,6 +391,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     if (ctx) ctx.close();
     timer = null; stream = null; ctx = null;
     setStatus("Stopped.");
+    logEvent("stopped, final peak " + peakRms.toFixed(4));
     startBtn.disabled = false;
     stopBtn.disabled = true;
   });
@@ -380,9 +409,41 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     const track = stream.getAudioTracks()[0];
     const state = track ? ("track " + track.readyState + ", muted " + track.muted) : "no mic track";
     const micName = track && track.label ? track.label : "unknown microphone";
-    const msg = "Build 9. Peak level " + peakRms.toFixed(4) + ". Context " + (ctx ? ctx.state : "none") + ". " + state + ". Microphone: " + micName + ".";
+    const msg = "Build 10. Peak level " + peakRms.toFixed(4) + ". Context " + (ctx ? ctx.state : "none") + ". " + state + ". Microphone: " + micName + ".";
     setStatus(msg);
     speak(msg);
+    logEvent("level check: " + msg);
+  });
+  // Copy the diagnostic log so it can be pasted into a message to
+  // Muse. Same clipboard approach as the link button.
+  const logBtn = document.getElementById("logBtn");
+  logBtn.addEventListener("click", async function () {
+    const text = "Talking Tuner diagnostic log\nPage: " + window.location.href + "\n" + diagLog.join("\n");
+    let copied = false;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        copied = true;
+      }
+    } catch (e) { /* fall through */ }
+    if (!copied) {
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed"; ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        copied = document.execCommand("copy");
+        document.body.removeChild(ta);
+      } catch (e) { copied = false; }
+    }
+    if (copied) {
+      setStatus("Log copied. Paste it into a message to Muse.");
+      speak("Log copied. Paste it into a message to Muse.");
+    } else {
+      setStatus("Log copy failed.");
+      speak("Log copy failed.");
+    }
   });
   // Safari, but it can copy its own address, so the user can paste
   // it into Safari. Modern clipboard first, old execCommand fallback.
