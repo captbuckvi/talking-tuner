@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Talking Tuner</title>
+<style>
+  body { font-family: -apple-system, Helvetica, Arial, sans-serif;
+         margin: 2em auto; max-width: 30em; padding: 0 1em; color: #111; }
+  h1 { font-size: 1.8em; }
+  button { font-size: 1.4em; padding: 0.7em 1.2em; margin: 0.3em 0.3em 0.3em 0;
+           border-radius: 0.5em; border: 2px solid #111; background: #fff; }
+  button:disabled { opacity: 0.4; }
+  #reading { font-size: 2em; font-weight: bold; min-height: 1.4em; }
+  #status { font-size: 1.1em; }
+  .note { color: #444; }
+</style>
+</head>
+<body>
+<h1>Talking Tuner</h1>
+<p>Play a string and the phone says which string it is and whether it
+is low or high, for example “low E string, low”. When the string
+comes in tune, the phone dings and says so. Everything runs on the
+phone. Nothing is sent anywhere.</p>
+<p>
+  <button id="guitarBtn" aria-label="Guitar" aria-pressed="true">Guitar</button>
+  <button id="ukeBtn" aria-label="Tenor ukulele" aria-pressed="false">Tenor ukulele</button>
+</p>
+<p id="strings">Guitar strings, low to high: E2, A2, D3, G3, B3, E4.</p>
+<p>
+  <button id="start" aria-label="Start listening">Start listening</button>
+  <button id="stop" aria-label="Stop listening" disabled>Stop</button>
+</p>
+<p id="status" role="status">Not listening yet.</p>
+<p id="reading" aria-label="Last reading"></p>
+<p class="note">Keep this page open and the phone awake while tuning.
+iOS pauses page audio if the page loses focus or the phone locks.
+The microphone only works on a secure page, so open this over HTTPS.</p>
+<script>
+// Talking tuner pitch detector — browser + Node.
+// Same algorithm as the Python tuner: windowed autocorrelation with
+// Hann-window bias correction, first-strong-peak picking, octave guard,
+// parabolic interpolation. Everything runs locally, no server trip.
+(function (root) {
+  const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+  const FMIN = 65, FMAX = 500, SILENCE_RMS = 0.01, MIN_CORR = 0.5;
+
+  function hann(n) {
+    const w = new Float64Array(n);
+    for (let i = 0; i < n; i++) w[i] = 0.5 * (1 - Math.cos(2 * Math.PI * i / (n - 1)));
+    return w;
+  }
+
+  // frame: array-like of audio samples. Returns frequency in Hz, or null.
+  function estimatePitch(frame, sr) {
+    const n = frame.length;
+    let mean = 0;
+    for (let i = 0; i < n; i++) mean += frame[i];
+    mean /= n;
+    const y = new Float64Array(n);
+    let ss = 0;
+    for (let i = 0; i < n; i++) { y[i] = frame[i] - mean; ss += y[i] * y[i]; }
+    const rms = Math.sqrt(ss / n);
+    if (rms < SILENCE_RMS) return null;
+    const w = hann(n);
+    const x = new Float64Array(n);
+    for (let i = 0; i < n; i++) x[i] = y[i] * w[i];
+    const minLag = Math.max(1, Math.floor(sr / FMAX));
+    const maxLag = Math.min(n - 2, Math.floor(sr / FMIN));
+    // Autocorrelation for lags 0..maxLag, and the window's own
+    // autocorrelation (to remove the Hann bias, worst on low strings).
+    const corr = new Float64Array(maxLag + 1);
+    const wac = new Float64Array(maxLag + 1);
+    for (let lag = 0; lag <= maxLag; lag++) {
+      let s = 0, ws = 0;
+      for (let j = 0; j + lag < n; j++) {
+        s += x[j] * x[j + lag];
+        ws += w[j] * w[j + lag];
+      }
+      corr[lag] = s;
+      wac[lag] = ws;
+    }
+    if (corr[0] <= 0) return null;
+    for (let lag = 0; lag <= maxLag; lag++) {
+      corr[lag] = corr[lag] / corr[0] / Math.max(wac[lag] / wac[0], 0.05);
+    }
+    // First strong peak, not the largest: autocorrelation repeats at
+    // every multiple of the period, so the largest peak may sit an
+    // octave or more too low.
+    let tau = -1;
+    for (let i = minLag; i < maxLag; i++) {
+      if (corr[i] > corr[i - 1] && corr[i] >= corr[i + 1] && corr[i] >= 0.8) {
+        tau = i;
+        break;
+      }
+    }
+    if (tau === -1) {
+      let best = -Infinity;
+      for (let i = minLag; i <= maxLag; i++) {
+        if (corr[i] > best) { best = corr[i]; tau = i; }
+      }
+    }
+    // Octave guard: a strong peak at half the lag means the true
+    // pitch is the higher one.
+    while (Math.floor(tau / 2) >= minLag && corr[Math.floor(tau / 2)] > 0.9 * corr[tau]) {
+      tau = Math.floor(tau / 2);
+    }
+    if (corr[tau] < MIN_CORR) return null;
+    const a = corr[tau - 1], b = corr[tau], c = corr[tau + 1];
+    const denom = a - 2 * b + c;
+    const shift = denom !== 0 ? 0.5 * (a - c) / denom : 0;
+    return sr / (tau + shift);
+  }
+
+  function freqToNote(freq) {
+    const midiFloat = 69 + 12 * Math.log2(freq / 440);
+    const nearest = Math.round(midiFloat);
+    const cents = Math.round(100 * (midiFloat - nearest));
+    const name = NOTE_NAMES[((nearest % 12) + 12) % 12] + (Math.floor(nearest / 12) - 1);
+    return { name, cents };
+  }
+
+  function describe(freq) {
+    const { name, cents } = freqToNote(freq);
+    if (cents === 0) return name + ", in tune";
+    return name + ", " + Math.abs(cents) + " cents " + (cents > 0 ? "sharp" : "flat");
+  }
+
+  // Strings the tuner names, with standard frequencies in Hz.
+  // Guitar: low to high. Ukulele: tenor, standard high-G tuning.
+  const IN_TUNE_CENTS = 5;
+  const GUITAR_STRINGS = [
+    { label: "low E string", freq: 82.4069 },
+    { label: "A string", freq: 110.0 },
+    { label: "D string", freq: 146.8324 },
+    { label: "G string", freq: 195.9977 },
+    { label: "B string", freq: 246.9417 },
+    { label: "high E string", freq: 329.6276 },
+  ];
+  const UKULELE_TENOR = [
+    { label: "G string", freq: 391.9954 },
+    { label: "C string", freq: 261.6256 },
+    { label: "E string", freq: 329.6276 },
+    { label: "A string", freq: 440.0 },
+  ];
+
+  function nearestString(freq, strings) {
+    let best = null, bestAbs = Infinity;
+    for (const s of strings) {
+      const cents = Math.round(1200 * Math.log2(freq / s.freq));
+      if (Math.abs(cents) < bestAbs) { bestAbs = Math.abs(cents); best = { label: s.label, cents }; }
+    }
+    return best;
+  }
+
+  // Spoken feedback, modeled on Buck's own tuner: the string name,
+  // then low or high, and "in tune" within a small window.
+  function describeString(freq, strings) {
+    const { label, cents } = nearestString(freq, strings);
+    if (Math.abs(cents) <= IN_TUNE_CENTS) return label + ", in tune";
+    return label + ", " + (cents > 0 ? "high" : "low");
+  }
+
+  function describeGuitar(freq) { return describeString(freq, GUITAR_STRINGS); }
+  function describeUkulele(freq) { return describeString(freq, UKULELE_TENOR); }
+
+  const api = { estimatePitch, freqToNote, describe, describeGuitar, describeUkulele, GUITAR_STRINGS, UKULELE_TENOR };
+  if (typeof module !== "undefined" && module.exports) module.exports = api;
+  root.TalkingTuner = api;
+})(typeof self !== "undefined" ? self : this);
+
+</script>
+<script>
+  const startBtn = document.getElementById("start");
+  const stopBtn = document.getElementById("stop");
+  const statusEl = document.getElementById("status");
+  const readingEl = document.getElementById("reading");
+  const guitarBtn = document.getElementById("guitarBtn");
+  const ukeBtn = document.getElementById("ukeBtn");
+  const stringsEl = document.getElementById("strings");
+  let instrument = "guitar";
+  guitarBtn.addEventListener("click", function () {
+    instrument = "guitar";
+    guitarBtn.setAttribute("aria-pressed", "true");
+    ukeBtn.setAttribute("aria-pressed", "false");
+    stringsEl.textContent = "Guitar strings, low to high: E2, A2, D3, G3, B3, E4.";
+    setStatus("Guitar selected. Not listening yet.");
+  });
+  ukeBtn.addEventListener("click", function () {
+    instrument = "ukulele";
+    guitarBtn.setAttribute("aria-pressed", "false");
+    ukeBtn.setAttribute("aria-pressed", "true");
+    stringsEl.textContent = "Tenor ukulele strings: G4, C4, E4, A4. Standard high-G tuning.";
+    setStatus("Tenor ukulele selected. Not listening yet.");
+  });
+  let ctx = null, analyser = null, stream = null, timer = null;
+  let recent = [], lastSpoken = "", lastAt = 0, lastDinged = null;
+
+  function setStatus(text) { statusEl.textContent = text; }
+  function median(arr) {
+    const s = arr.slice().sort(function (a, b) { return a - b; });
+    return s[Math.floor(s.length / 2)];
+  }
+  function speak(text) {
+    try {
+      speechSynthesis.cancel();
+      speechSynthesis.speak(new SpeechSynthesisUtterance(text));
+    } catch (e) { /* speech unavailable: the reading stays on screen */ }
+  }
+  // A short two-part ding, synthesized in the browser, no audio file.
+  function playDing() {
+    if (!ctx) return;
+    try {
+      const t = ctx.currentTime;
+      [[1568, 0.25], [2093, 0.12]].forEach(function (pair) {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "sine"; osc.frequency.value = pair[0];
+        gain.gain.setValueAtTime(pair[1], t);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.9);
+        osc.connect(gain); gain.connect(ctx.destination);
+        osc.start(t); osc.stop(t + 1.0);
+      });
+    } catch (e) { /* no ding: the spoken "in tune" still carries it */ }
+  }
+  function tick() {
+    const data = new Float32Array(analyser.fftSize);
+    analyser.getFloatTimeDomainData(data);
+    const freq = TalkingTuner.estimatePitch(data, ctx.sampleRate);
+    if (freq === null) { recent = []; return; }
+    recent.push(freq);
+    if (recent.length > 5) recent.shift();
+    if (recent.length < 5) return;
+    const freq = median(recent);
+    const spoken = instrument === "ukulele"
+      ? TalkingTuner.describeUkulele(freq)
+      : TalkingTuner.describeGuitar(freq);
+    const now = Date.now();
+    if (spoken.indexOf("in tune") !== -1) {
+      // Ding once per string when it comes in tune, then stay quiet
+      // while it remains in tune.
+      const stringLabel = spoken.split(", ")[0];
+      if (lastDinged !== stringLabel) {
+        playDing();
+        readingEl.textContent = spoken;
+        speak(spoken);
+        lastDinged = stringLabel;
+      }
+    } else {
+      lastDinged = null;
+      if (spoken !== lastSpoken && now - lastAt > 800) {
+        readingEl.textContent = spoken;
+        speak(spoken);
+        lastSpoken = spoken;
+        lastAt = now;
+      }
+    }
+  }
+  startBtn.addEventListener("click", async function () {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setStatus("Microphone unavailable: this page needs a secure connection (HTTPS).");
+      return;
+    }
+    setStatus("Asking for the microphone…");
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: {
+        echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+    } catch (e) {
+      setStatus("Microphone unavailable: " + e.message);
+      return;
+    }
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
+    if (ctx.resume) ctx.resume();
+    const src = ctx.createMediaStreamSource(stream);
+    analyser = ctx.createAnalyser();
+    analyser.fftSize = 4096;
+    src.connect(analyser);
+    recent = []; lastSpoken = ""; lastAt = 0; lastDinged = null;
+    setStatus("Listening… play a string.");
+    timer = setInterval(tick, 100);
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
+  });
+  stopBtn.addEventListener("click", function () {
+    if (timer) clearInterval(timer);
+    if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
+    if (ctx) ctx.close();
+    timer = null; stream = null; ctx = null;
+    setStatus("Stopped.");
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+  });
+</script>
+</body>
+</html>
