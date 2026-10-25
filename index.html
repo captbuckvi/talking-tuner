@@ -29,7 +29,7 @@ phone. Nothing is sent anywhere.</p>
 hear you, tap Copy tuner link, then say “Hey Siri, open Safari”,
 tap the address bar, and choose Paste and Go. The tuner needs real
 Safari to hear the microphone.</p>
-<p class="note" id="buildTag">Talking Tuner, build 10.</p>
+<p class="note" id="buildTag">Talking Tuner, build 11.</p>
 <p>
   <button id="guitarBtn" aria-label="Guitar" aria-pressed="true">Guitar</button>
   <button id="ukeBtn" aria-label="Tenor ukulele" aria-pressed="false">Tenor ukulele</button>
@@ -40,6 +40,7 @@ Safari to hear the microphone.</p>
   <button id="stop" aria-label="Stop listening" disabled>Stop</button>
   <button id="levelBtn" aria-label="Check microphone level">Check microphone level</button>
   <button id="logBtn" aria-label="Copy diagnostic log">Copy diagnostic log</button>
+  <button id="retryBtn" aria-label="Retry microphone">Retry microphone</button>
 </p>
 <p id="status" role="status">Not listening yet.</p>
 <p id="reading" aria-label="Last reading"></p>
@@ -316,7 +317,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
       }
     }
   }
-  startBtn.addEventListener("click", async function () {
+  async function startListening() {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       setStatus("Microphone unavailable: this page needs a secure connection (HTTPS).");
       speak("Microphone unavailable. This page needs a secure connection.");
@@ -368,6 +369,22 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
         ", echo=" + st.echoCancellation + ", noise=" + st.noiseSuppression + ", gain=" + st.autoGainControl +
         ", context=" + ctx.state + ", engineRate=" + ctx.sampleRate);
     } catch (e) { logEvent("track info unavailable: " + e.message); }
+    // Announce system mute changes as they happen: a track that
+    // flips to muted mid-session is the system gagging the mic,
+    // and the page should say so instead of just going quiet.
+    try {
+      const trk = stream.getAudioTracks()[0];
+      trk.addEventListener("mute", function () {
+        setStatus("Microphone muted by the system.");
+        speak("Microphone muted by the system.");
+        logEvent("track event: mute");
+      });
+      trk.addEventListener("unmute", function () {
+        setStatus("Microphone unmuted.");
+        speak("Microphone unmuted.");
+        logEvent("track event: unmute");
+      });
+    } catch (e) { logEvent("mute listeners unavailable: " + e.message); }
     // Safari only renders the graph if it reaches the destination.
     // A zero-gain link keeps the mic silent while letting the
     // analyser actually receive data; without it the analyser can
@@ -384,7 +401,8 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     timer = setInterval(tick, 100);
     startBtn.disabled = true;
     stopBtn.disabled = false;
-  });
+  }
+  startBtn.addEventListener("click", startListening);
   stopBtn.addEventListener("click", function () {
     if (timer) clearInterval(timer);
     if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
@@ -409,12 +427,25 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     const track = stream.getAudioTracks()[0];
     const state = track ? ("track " + track.readyState + ", muted " + track.muted) : "no mic track";
     const micName = track && track.label ? track.label : "unknown microphone";
-    const msg = "Build 10. Peak level " + peakRms.toFixed(4) + ". Context " + (ctx ? ctx.state : "none") + ". " + state + ". Microphone: " + micName + ".";
+    const msg = "Build 11. Peak level " + peakRms.toFixed(4) + ". Context " + (ctx ? ctx.state : "none") + ". " + state + ". Microphone: " + micName + ".";
     setStatus(msg);
     speak(msg);
     logEvent("level check: " + msg);
   });
-  // Copy the diagnostic log so it can be pasted into a message to
+  // Retry: tear the mic stream down completely and start fresh.
+  // A track stuck muted sometimes comes back on a fresh request.
+  const retryBtn = document.getElementById("retryBtn");
+  retryBtn.addEventListener("click", function () {
+    logEvent("retry microphone tapped");
+    if (timer) clearInterval(timer);
+    if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
+    if (ctx) ctx.close();
+    timer = null; stream = null; ctx = null;
+    stopBtn.disabled = true;
+    startBtn.disabled = false;
+    setStatus("Retrying microphone…");
+    startListening();
+  });
   // Muse. Same clipboard approach as the link button.
   const logBtn = document.getElementById("logBtn");
   logBtn.addEventListener("click", async function () {
