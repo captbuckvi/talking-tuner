@@ -195,6 +195,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
   });
   let ctx = null, analyser = null, stream = null, timer = null;
   let recent = [], lastSpoken = "", lastAt = 0, lastDinged = null;
+  let listenStartedAt = 0, heardSound = false, silenceAnnounced = false, noPitchAnnounced = false;
 
   function setStatus(text) { statusEl.textContent = text; }
   function median(arr) {
@@ -223,11 +224,39 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
       });
     } catch (e) { /* no ding: the spoken "in tune" still carries it */ }
   }
+  // Spoken diagnostics, once per listening session, so a silent
+  // failure can never hide again: silence means no audio reaches
+  // the page at all; sound without pitch means the detector is
+  // hearing something it cannot turn into a note.
+  function maybeAnnounceDiagnostics() {
+    const elapsed = Date.now() - listenStartedAt;
+    if (!silenceAnnounced && !heardSound && elapsed > 3000) {
+      silenceAnnounced = true;
+      setStatus("Microphone is on, but I hear silence.");
+      speak("Microphone is on, but I hear silence.");
+    } else if (!noPitchAnnounced && heardSound && elapsed > 5000) {
+      noPitchAnnounced = true;
+      setStatus("I hear sound, but I cannot find a pitch.");
+      speak("I hear sound, but I cannot find a pitch.");
+    }
+  }
   function tick() {
-    const data = new Float32Array(analyser.fftSize);
-    analyser.getFloatTimeDomainData(data);
+    let data;
+    if (analyser.getFloatTimeDomainData) {
+      data = new Float32Array(analyser.fftSize);
+      analyser.getFloatTimeDomainData(data);
+    } else {
+      const bytes = new Uint8Array(analyser.fftSize);
+      analyser.getByteTimeDomainData(bytes);
+      data = new Float32Array(bytes.length);
+      for (let i = 0; i < bytes.length; i++) data[i] = (bytes[i] - 128) / 128;
+    }
+    let ss = 0;
+    for (let i = 0; i < data.length; i++) ss += data[i] * data[i];
+    const tickRms = Math.sqrt(ss / data.length);
+    if (tickRms >= 0.01) heardSound = true;
     const freq = TalkingTuner.estimatePitch(data, ctx.sampleRate);
-    if (freq === null) { recent = []; return; }
+    if (freq === null) { recent = []; maybeAnnounceDiagnostics(); return; }
     recent.push(freq);
     if (recent.length > 5) recent.shift();
     if (recent.length < 5) return;
@@ -262,6 +291,18 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
       speak("Microphone unavailable. This page needs a secure connection.");
       return;
     }
+    // Create the audio engine on the tap itself: iOS ignores audio
+    // setup that happens after waiting for permission.
+    try {
+      ctx = new (window.AudioContext || window.webkitAudioContext)();
+      if (ctx.resume) ctx.resume();
+      analyser = ctx.createAnalyser();
+      analyser.fftSize = 4096;
+    } catch (e) {
+      setStatus("Audio engine unavailable: " + e.message);
+      speak("Audio engine unavailable. " + e.message);
+      return;
+    }
     setStatus("Asking for the microphone…");
     speak("Asking for the microphone.");
     try {
@@ -270,15 +311,15 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     } catch (e) {
       setStatus("Microphone unavailable: " + e.message);
       speak("Microphone unavailable. " + e.message);
+      try { ctx.close(); } catch (e2) {}
+      ctx = null; analyser = null;
       return;
     }
-    ctx = new (window.AudioContext || window.webkitAudioContext)();
     if (ctx.resume) ctx.resume();
     const src = ctx.createMediaStreamSource(stream);
-    analyser = ctx.createAnalyser();
-    analyser.fftSize = 4096;
     src.connect(analyser);
     recent = []; lastSpoken = ""; lastAt = 0; lastDinged = null;
+    listenStartedAt = Date.now(); heardSound = false; silenceAnnounced = false; noPitchAnnounced = false;
     setStatus("Listening… play a string.");
     speak("Listening. Play a string.");
     timer = setInterval(tick, 100);
