@@ -29,7 +29,7 @@ phone. Nothing is sent anywhere.</p>
 hear you, tap Copy tuner link, then say “Hey Siri, open Safari”,
 tap the address bar, and choose Paste and Go. The tuner needs real
 Safari to hear the microphone.</p>
-<p class="note" id="buildTag">Talking Tuner, build 13.</p>
+<p class="note" id="buildTag">Talking Tuner, build 14.</p>
 <p>
   <button id="guitarBtn" aria-label="Guitar" aria-pressed="true">Guitar</button>
   <button id="ukeBtn" aria-label="Tenor ukulele" aria-pressed="false">Tenor ukulele</button>
@@ -346,6 +346,12 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     try {
       ctx = new (window.AudioContext || window.webkitAudioContext)();
       if (ctx.resume) ctx.resume();
+      // Claudette's fix (issue #4): iOS suspends the context on any
+      // interruption, so resume it whenever it suspends.
+      const thisCtx = ctx;
+      ctx.addEventListener("statechange", function () {
+        if (thisCtx.state === "suspended" && thisCtx.resume) thisCtx.resume();
+      });
       analyser = ctx.createAnalyser();
       analyser.fftSize = 4096;
     } catch (e) {
@@ -401,6 +407,22 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
         setStatus("Microphone unmuted.");
         speak("Microphone unmuted.");
         logEvent("track event: unmute");
+        // Claudette's fix (issue #4): when iOS finally opens the
+        // session, rebuild the analyser path so the new audio
+        // actually flows, instead of trusting the old graph.
+        try {
+          if (ctx && ctx.state === "suspended" && ctx.resume) ctx.resume();
+          if (src && analyser && silentGain) {
+            try { analyser.disconnect(); } catch (e) {}
+            analyser = ctx.createAnalyser();
+            analyser.fftSize = 4096;
+            src.disconnect();
+            src.connect(analyser);
+            analyser.connect(silentGain);
+            recent = [];
+            logEvent("analyser restarted on unmute");
+          }
+        } catch (e) { logEvent("analyser restart on unmute failed: " + e.message); }
       });
       // If the track starts gagged, tear it down and ask once more
       // without making the user tap anything: a fresh request
@@ -462,7 +484,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     const track = stream.getAudioTracks()[0];
     const state = track ? ("track " + track.readyState + ", muted " + track.muted) : "no mic track";
     const micName = track && track.label ? track.label : "unknown microphone";
-    const msg = "Build 13. Peak level " + peakRms.toFixed(4) + ". Context " + (ctx ? ctx.state : "none") + ". " + state + ". Microphone: " + micName + ".";
+    const msg = "Build 14. Peak level " + peakRms.toFixed(4) + ". Context " + (ctx ? ctx.state : "none") + ". " + state + ". Microphone: " + micName + ".";
     setStatus(msg);
     speak(msg);
     logEvent("level check: " + msg);
