@@ -37,6 +37,7 @@ Safari to hear the microphone.</p>
 <p>
   <button id="start" aria-label="Start listening">Start listening</button>
   <button id="stop" aria-label="Stop listening" disabled>Stop</button>
+  <button id="levelBtn" aria-label="Check microphone level">Check microphone level</button>
 </p>
 <p id="status" role="status">Not listening yet.</p>
 <p id="reading" aria-label="Last reading"></p>
@@ -203,6 +204,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
   let ctx = null, analyser = null, stream = null, timer = null;
   let recent = [], lastSpoken = "", lastAt = 0, lastDinged = null;
   let listenStartedAt = 0, heardSound = false, silenceAnnounced = false, noPitchAnnounced = false;
+  let peakRms = 0;
 
   function setStatus(text) { statusEl.textContent = text; }
   function median(arr) {
@@ -239,8 +241,8 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     const elapsed = Date.now() - listenStartedAt;
     if (!silenceAnnounced && !heardSound && elapsed > 3000) {
       silenceAnnounced = true;
-      setStatus("Microphone is on, but I hear silence.");
-      speak("Microphone is on, but I hear silence.");
+      setStatus("Microphone is on, but I hear silence. Loudest level so far: " + peakRms.toFixed(4) + ".");
+      speak("Microphone is on, but I hear silence. Loudest level so far: " + peakRms.toFixed(4) + ".");
     } else if (!noPitchAnnounced && heardSound && elapsed > 5000) {
       noPitchAnnounced = true;
       setStatus("I hear sound, but I cannot find a pitch.");
@@ -261,6 +263,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     let ss = 0;
     for (let i = 0; i < data.length; i++) ss += data[i] * data[i];
     const tickRms = Math.sqrt(ss / data.length);
+    if (tickRms > peakRms) peakRms = tickRms;
     if (tickRms >= 0.01) heardSound = true;
     const freq = TalkingTuner.estimatePitch(data, ctx.sampleRate);
     if (freq === null) { recent = []; maybeAnnounceDiagnostics(); return; }
@@ -313,8 +316,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     setStatus("Asking for the microphone…");
     speak("Asking for the microphone.");
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: {
-        echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch (e) {
       setStatus("Microphone unavailable: " + e.message);
       speak("Microphone unavailable. " + e.message);
@@ -327,6 +329,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     src.connect(analyser);
     recent = []; lastSpoken = ""; lastAt = 0; lastDinged = null;
     listenStartedAt = Date.now(); heardSound = false; silenceAnnounced = false; noPitchAnnounced = false;
+    peakRms = 0;
     setStatus("Listening… play a string.");
     speak("Listening. Play a string.");
     timer = setInterval(tick, 100);
@@ -342,7 +345,23 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     startBtn.disabled = false;
     stopBtn.disabled = true;
   });
-  // Escape hatch for in-app viewers: a page cannot open itself in
+  // Spoken level check: reports the loudest level heard since
+  // listening started, plus whether iOS has muted the mic track.
+  // Zero means true silence; a small nonzero number means the mic
+  // works but the guitar is too quiet or too far away.
+  const levelBtn = document.getElementById("levelBtn");
+  levelBtn.addEventListener("click", function () {
+    if (!analyser || !stream) {
+      setStatus("Not listening yet. Tap Start listening first.");
+      speak("Not listening yet. Tap Start listening first.");
+      return;
+    }
+    const track = stream.getAudioTracks()[0];
+    const state = track ? ("track " + track.readyState + ", muted " + track.muted) : "no mic track";
+    const msg = "Peak level " + peakRms.toFixed(4) + ". " + state + ".";
+    setStatus(msg);
+    speak(msg);
+  });
   // Safari, but it can copy its own address, so the user can paste
   // it into Safari. Modern clipboard first, old execCommand fallback.
   const copyBtn = document.getElementById("copyLink");
