@@ -29,7 +29,7 @@ phone. Nothing is sent anywhere.</p>
 hear you, tap Copy tuner link, then say “Hey Siri, open Safari”,
 tap the address bar, and choose Paste and Go. The tuner needs real
 Safari to hear the microphone.</p>
-<p class="note" id="buildTag">Talking Tuner, build 6.</p>
+<p class="note" id="buildTag">Talking Tuner, build 7.</p>
 <p>
   <button id="guitarBtn" aria-label="Guitar" aria-pressed="true">Guitar</button>
   <button id="ukeBtn" aria-label="Tenor ukulele" aria-pressed="false">Tenor ukulele</button>
@@ -336,6 +336,14 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     if (ctx.resume) ctx.resume();
     const src = ctx.createMediaStreamSource(stream);
     src.connect(analyser);
+    // Safari only renders the graph if it reaches the destination.
+    // A zero-gain link keeps the mic silent while letting the
+    // analyser actually receive data; without it the analyser can
+    // sit at zero forever despite a live mic.
+    const silentGain = ctx.createGain();
+    silentGain.gain.value = 0;
+    analyser.connect(silentGain);
+    silentGain.connect(ctx.destination);
     recent = []; lastSpoken = ""; lastAt = 0; lastDinged = null;
     listenStartedAt = Date.now(); heardSound = false; silenceAnnounced = false; noPitchAnnounced = false;
     peakRms = 0;
@@ -367,7 +375,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     }
     const track = stream.getAudioTracks()[0];
     const state = track ? ("track " + track.readyState + ", muted " + track.muted) : "no mic track";
-    const msg = "Build 6. Peak level " + peakRms.toFixed(4) + ". " + state + ".";
+    const msg = "Build 7. Peak level " + peakRms.toFixed(4) + ". Context " + (ctx ? ctx.state : "none") + ". " + state + ".";
     setStatus(msg);
     speak(msg);
   });
