@@ -29,7 +29,7 @@ phone. Nothing is sent anywhere.</p>
 hear you, tap Copy tuner link, then say “Hey Siri, open Safari”,
 tap the address bar, and choose Paste and Go. The tuner needs real
 Safari to hear the microphone.</p>
-<p class="note" id="buildTag">Talking Tuner, build 7.</p>
+<p class="note" id="buildTag">Talking Tuner, build 8.</p>
 <p>
   <button id="guitarBtn" aria-label="Guitar" aria-pressed="true">Guitar</button>
   <button id="ukeBtn" aria-label="Tenor ukulele" aria-pressed="false">Tenor ukulele</button>
@@ -54,7 +54,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
 // difference-function dip stays clear. Everything runs locally.
 (function (root) {
   const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
-  const FMIN = 65, FMAX = 500, SILENCE_RMS = 0.01;
+  const FMIN = 65, FMAX = 500, SILENCE_RMS = 0.005;
 
   // frame: array-like of audio samples. Returns frequency in Hz, or null.
   function estimatePitch(frame, sr) {
@@ -287,7 +287,11 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
       }
     } else {
       lastDinged = null;
-      if (spoken !== lastSpoken && now - lastAt > 800) {
+      // Repeat the same reading every few seconds while the note
+      // sustains: the old rule only spoke when the reading changed,
+      // so a steady flat string was announced once and then never
+      // again, which felt like the tuner had gone deaf.
+      if ((spoken !== lastSpoken || now - lastAt > 2500) && now - lastAt > 800) {
         readingEl.textContent = spoken;
         speak(spoken);
         lastSpoken = spoken;
@@ -375,7 +379,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     }
     const track = stream.getAudioTracks()[0];
     const state = track ? ("track " + track.readyState + ", muted " + track.muted) : "no mic track";
-    const msg = "Build 7. Peak level " + peakRms.toFixed(4) + ". Context " + (ctx ? ctx.state : "none") + ". " + state + ".";
+    const msg = "Build 8. Peak level " + peakRms.toFixed(4) + ". Context " + (ctx ? ctx.state : "none") + ". " + state + ".";
     setStatus(msg);
     speak(msg);
   });
