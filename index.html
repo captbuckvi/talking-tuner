@@ -29,6 +29,7 @@ phone. Nothing is sent anywhere.</p>
 hear you, tap Copy tuner link, then say “Hey Siri, open Safari”,
 tap the address bar, and choose Paste and Go. The tuner needs real
 Safari to hear the microphone.</p>
+<p class="note" id="buildTag">Talking Tuner, build 6.</p>
 <p>
   <button id="guitarBtn" aria-label="Guitar" aria-pressed="true">Guitar</button>
   <button id="ukeBtn" aria-label="Tenor ukulele" aria-pressed="false">Tenor ukulele</button>
@@ -46,18 +47,14 @@ iOS pauses page audio if the page loses focus or the phone locks.
 The microphone only works on a secure page, so open this over HTTPS.</p>
 <script>
 // Talking tuner pitch detector — browser + Node.
-// Same algorithm as the Python tuner: windowed autocorrelation with
-// Hann-window bias correction, first-strong-peak picking, octave guard,
-// parabolic interpolation. Everything runs locally, no server trip.
+// YIN (de Cheveigné & Kawahara 2002): difference function plus
+// cumulative-mean-normalized difference, first dip below threshold.
+// Far more forgiving on real instruments than plain autocorrelation:
+// a decaying guitar note rarely holds a 0.8 correlation peak, but its
+// difference-function dip stays clear. Everything runs locally.
 (function (root) {
   const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
-  const FMIN = 65, FMAX = 500, SILENCE_RMS = 0.01, MIN_CORR = 0.5;
-
-  function hann(n) {
-    const w = new Float64Array(n);
-    for (let i = 0; i < n; i++) w[i] = 0.5 * (1 - Math.cos(2 * Math.PI * i / (n - 1)));
-    return w;
-  }
+  const FMIN = 65, FMAX = 500, SILENCE_RMS = 0.01;
 
   // frame: array-like of audio samples. Returns frequency in Hz, or null.
   function estimatePitch(frame, sr) {
@@ -70,53 +67,50 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     for (let i = 0; i < n; i++) { y[i] = frame[i] - mean; ss += y[i] * y[i]; }
     const rms = Math.sqrt(ss / n);
     if (rms < SILENCE_RMS) return null;
-    const w = hann(n);
-    const x = new Float64Array(n);
-    for (let i = 0; i < n; i++) x[i] = y[i] * w[i];
     const minLag = Math.max(1, Math.floor(sr / FMAX));
     const maxLag = Math.min(n - 2, Math.floor(sr / FMIN));
-    // Autocorrelation for lags 0..maxLag, and the window's own
-    // autocorrelation (to remove the Hann bias, worst on low strings).
-    const corr = new Float64Array(maxLag + 1);
-    const wac = new Float64Array(maxLag + 1);
-    for (let lag = 0; lag <= maxLag; lag++) {
-      let s = 0, ws = 0;
-      for (let j = 0; j + lag < n; j++) {
-        s += x[j] * x[j + lag];
-        ws += w[j] * w[j + lag];
+    // Difference function d(tau) for every candidate period.
+    const diff = new Float64Array(maxLag + 1);
+    for (let tau = 1; tau <= maxLag; tau++) {
+      let s = 0;
+      for (let j = 0; j + tau < n; j++) {
+        const d = y[j] - y[j + tau];
+        s += d * d;
       }
-      corr[lag] = s;
-      wac[lag] = ws;
+      diff[tau] = s;
     }
-    if (corr[0] <= 0) return null;
-    for (let lag = 0; lag <= maxLag; lag++) {
-      corr[lag] = corr[lag] / corr[0] / Math.max(wac[lag] / wac[0], 0.05);
+    // Cumulative mean normalized difference: d'(tau) = d(tau) /
+    // (mean of d(1..tau)). Near 1 for aperiodic sound, near 0 at
+    // the true period.
+    const cmnd = new Float64Array(maxLag + 1);
+    let running = 0;
+    for (let tau = 1; tau <= maxLag; tau++) {
+      running += diff[tau];
+      cmnd[tau] = running > 0 ? diff[tau] / (running / tau) : 1;
     }
-    // First strong peak, not the largest: autocorrelation repeats at
-    // every multiple of the period, so the largest peak may sit an
-    // octave or more too low.
+    // First LOCAL MINIMUM below the absolute threshold — not the
+    // first crossing, which sits on the slow descent well before
+    // the true dip (that bug read every string flat). Fall back to
+    // the deepest dip if no minimum crosses it, rejecting unclear
+    // frames.
     let tau = -1;
-    for (let i = minLag; i < maxLag; i++) {
-      if (corr[i] > corr[i - 1] && corr[i] >= corr[i + 1] && corr[i] >= 0.8) {
-        tau = i;
-        break;
-      }
+    for (let t = minLag + 1; t < maxLag; t++) {
+      if (cmnd[t] < 0.15 && cmnd[t] <= cmnd[t - 1] && cmnd[t] <= cmnd[t + 1]) { tau = t; break; }
     }
     if (tau === -1) {
-      let best = -Infinity;
-      for (let i = minLag; i <= maxLag; i++) {
-        if (corr[i] > best) { best = corr[i]; tau = i; }
+      let best = Infinity;
+      for (let t = minLag; t <= maxLag; t++) {
+        if (cmnd[t] < best) { best = cmnd[t]; tau = t; }
       }
+      if (best > 0.4) return null;
     }
-    // Octave guard: a strong peak at half the lag means the true
-    // pitch is the higher one.
-    while (Math.floor(tau / 2) >= minLag && corr[Math.floor(tau / 2)] > 0.9 * corr[tau]) {
-      tau = Math.floor(tau / 2);
+    // Parabolic interpolation on the CMND curve around the dip.
+    let shift = 0;
+    if (tau > minLag && tau < maxLag) {
+      const a = cmnd[tau - 1], b = cmnd[tau], c = cmnd[tau + 1];
+      const denom = a - 2 * b + c;
+      if (denom !== 0) shift = 0.5 * (a - c) / denom;
     }
-    if (corr[tau] < MIN_CORR) return null;
-    const a = corr[tau - 1], b = corr[tau], c = corr[tau + 1];
-    const denom = a - 2 * b + c;
-    const shift = denom !== 0 ? 0.5 * (a - c) / denom : 0;
     return sr / (tau + shift);
   }
 
@@ -266,7 +260,13 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     if (tickRms > peakRms) peakRms = tickRms;
     if (tickRms >= 0.01) heardSound = true;
     const freq = TalkingTuner.estimatePitch(data, ctx.sampleRate);
-    if (freq === null) { recent = []; maybeAnnounceDiagnostics(); return; }
+    if (freq === null) { maybeAnnounceDiagnostics(); return; }
+    // A new string resets the window: if this estimate sits far from
+    // the running median, the old string's estimates are stale.
+    if (recent.length) {
+      const med = median(recent);
+      if (Math.abs(freq - med) / med > 0.03) recent = [];
+    }
     recent.push(freq);
     if (recent.length > 5) recent.shift();
     if (recent.length < 5) return;
@@ -316,7 +316,16 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     setStatus("Asking for the microphone…");
     speak("Asking for the microphone.");
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Clean mic input: the browser's voice processing (echo
+      // cancellation, noise suppression, auto gain) is built for
+      // speech and mangles sustained musical tones, so turn it off.
+      // Fall back to plain audio if a browser rejects the strict set.
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: {
+          echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+      } catch (e) {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      }
     } catch (e) {
       setStatus("Microphone unavailable: " + e.message);
       speak("Microphone unavailable. " + e.message);
@@ -358,7 +367,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     }
     const track = stream.getAudioTracks()[0];
     const state = track ? ("track " + track.readyState + ", muted " + track.muted) : "no mic track";
-    const msg = "Peak level " + peakRms.toFixed(4) + ". " + state + ".";
+    const msg = "Build 6. Peak level " + peakRms.toFixed(4) + ". " + state + ".";
     setStatus(msg);
     speak(msg);
   });
