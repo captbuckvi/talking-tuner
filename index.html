@@ -29,7 +29,7 @@ phone. Nothing is sent anywhere.</p>
 hear you, tap Copy tuner link, then say “Hey Siri, open Safari”,
 tap the address bar, and choose Paste and Go. The tuner needs real
 Safari to hear the microphone.</p>
-<p class="note" id="buildTag">Talking Tuner, build 11.</p>
+<p class="note" id="buildTag">Talking Tuner, build 12.</p>
 <p>
   <button id="guitarBtn" aria-label="Guitar" aria-pressed="true">Guitar</button>
   <button id="ukeBtn" aria-label="Tenor ukulele" aria-pressed="false">Tenor ukulele</button>
@@ -167,8 +167,20 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
 
   function describeGuitar(freq) { return describeString(freq, GUITAR_STRINGS); }
   function describeUkulele(freq) { return describeString(freq, UKULELE_TENOR); }
+  // Distance in cents from the nearest string of the instrument.
+  // A tuner reading hundreds of cents from every string is noise
+  // (mains hum sits far below low E), not a string being tuned.
+  function centsToNearestString(freq, instrument) {
+    const strings = instrument === "ukulele" ? UKULELE_TENOR : GUITAR_STRINGS;
+    let best = Infinity;
+    for (const s of strings) {
+      const cents = Math.abs(Math.round(1200 * Math.log2(freq / s.freq)));
+      if (cents < best) best = cents;
+    }
+    return best;
+  }
 
-  const api = { estimatePitch, freqToNote, describe, describeGuitar, describeUkulele, GUITAR_STRINGS, UKULELE_TENOR };
+  const api = { estimatePitch, freqToNote, describe, describeGuitar, describeUkulele, centsToNearestString, GUITAR_STRINGS, UKULELE_TENOR };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   root.TalkingTuner = api;
 })(typeof self !== "undefined" ? self : this);
@@ -199,6 +211,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
   });
   let ctx = null, analyser = null, stream = null, timer = null;
   let recent = [], lastSpoken = "", lastAt = 0, lastDinged = null;
+  let repeatCount = 0, autoRetried = false;
   let listenStartedAt = 0, heardSound = false, silenceAnnounced = false, noPitchAnnounced = false;
   let peakRms = 0, tickCount = 0;
   // Diagnostic log: what happened, in order, so Buck can paste it
@@ -277,6 +290,9 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     if (tickRms >= 0.01) heardSound = true;
     const freq = TalkingTuner.estimatePitch(data, ctx.sampleRate);
     if (freq === null) { maybeAnnounceDiagnostics(); return; }
+    // Noise gate: a reading far from every string is not a string
+    // being tuned (mains hum reads near low E), so ignore the frame.
+    if (TalkingTuner.centsToNearestString(freq, instrument) > 300) return;
     // A new string resets the window: if this estimate sits far from
     // the running median, the old string's estimates are stale.
     if (recent.length) {
@@ -304,14 +320,16 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
       }
     } else {
       lastDinged = null;
-      // Repeat the same reading every few seconds while the note
-      // sustains: the old rule only spoke when the reading changed,
-      // so a steady flat string was announced once and then never
-      // again, which felt like the tuner had gone deaf.
-      if ((spoken !== lastSpoken || now - lastAt > 2500) && now - lastAt > 800) {
+      // Repeat the same reading a few times while the note
+      // sustains, then stop: an endless loop on one steady reading
+      // is worse than silence, and the next change still speaks.
+      const changed = spoken !== lastSpoken;
+      if (changed) repeatCount = 0;
+      if ((changed || (now - lastAt > 2500 && repeatCount < 3)) && now - lastAt > 800) {
         readingEl.textContent = spoken;
         speak(spoken);
         logEvent("says: " + spoken);
+        if (!changed) repeatCount++;
         lastSpoken = spoken;
         lastAt = now;
       }
@@ -384,6 +402,22 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
         speak("Microphone unmuted.");
         logEvent("track event: unmute");
       });
+      // If the track starts gagged, tear it down and ask once more
+      // without making the user tap anything: a fresh request
+      // sometimes comes back ungagged.
+      if (trk.muted && !autoRetried) {
+        autoRetried = true;
+        logEvent("auto-retry on initial mute");
+        if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
+        if (ctx) ctx.close();
+        timer = null; stream = null; ctx = null;
+        stopBtn.disabled = true;
+        startBtn.disabled = false;
+        setStatus("Microphone muted by the system, retrying.");
+        speak("Microphone muted by the system, retrying.");
+        startListening();
+        return;
+      }
     } catch (e) { logEvent("mute listeners unavailable: " + e.message); }
     // Safari only renders the graph if it reaches the destination.
     // A zero-gain link keeps the mic silent while letting the
@@ -394,6 +428,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     analyser.connect(silentGain);
     silentGain.connect(ctx.destination);
     recent = []; lastSpoken = ""; lastAt = 0; lastDinged = null;
+    repeatCount = 0;
     listenStartedAt = Date.now(); heardSound = false; silenceAnnounced = false; noPitchAnnounced = false;
     peakRms = 0;
     setStatus("Listening… play a string.");
@@ -402,7 +437,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     startBtn.disabled = true;
     stopBtn.disabled = false;
   }
-  startBtn.addEventListener("click", startListening);
+  startBtn.addEventListener("click", function () { autoRetried = false; startListening(); });
   stopBtn.addEventListener("click", function () {
     if (timer) clearInterval(timer);
     if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
@@ -427,7 +462,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     const track = stream.getAudioTracks()[0];
     const state = track ? ("track " + track.readyState + ", muted " + track.muted) : "no mic track";
     const micName = track && track.label ? track.label : "unknown microphone";
-    const msg = "Build 11. Peak level " + peakRms.toFixed(4) + ". Context " + (ctx ? ctx.state : "none") + ". " + state + ". Microphone: " + micName + ".";
+    const msg = "Build 12. Peak level " + peakRms.toFixed(4) + ". Context " + (ctx ? ctx.state : "none") + ". " + state + ". Microphone: " + micName + ".";
     setStatus(msg);
     speak(msg);
     logEvent("level check: " + msg);
@@ -444,6 +479,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     stopBtn.disabled = true;
     startBtn.disabled = false;
     setStatus("Retrying microphone…");
+    autoRetried = false;
     startListening();
   });
   // Muse. Same clipboard approach as the link button.
