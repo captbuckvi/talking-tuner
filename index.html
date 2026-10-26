@@ -26,7 +26,7 @@ phone. Nothing is sent anywhere.</p>
   <button id=”copyLink” aria-label=”Copy tuner link”>Copy tuner link</button>
   <button id=”openSafari” aria-label=”Open in Safari”>Open in Safari</button>
 </p>
-<p class=”note” id=”buildTag”>Talking Tuner, build 18.</p>
+<p class=”note” id=”buildTag”>Talking Tuner, build 19.</p>
 <p>
   <button id="guitarBtn" aria-label="Guitar" aria-pressed="true">Guitar</button>
   <button id="ukeBtn" aria-label="Tenor ukulele" aria-pressed="false">Tenor ukulele</button>
@@ -224,7 +224,22 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     diagLog.push(t + " " + text);
     if (diagLog.length > 300) diagLog.shift();
   }
-  logEvent("page loaded, build 18, " + navigator.userAgent);
+  // Remote logging: key events are POSTed to a webhook so the
+  // developer can see exactly what iOS is doing without Buck
+  // having to copy and paste anything.
+  const REMOTE_LOG_URL = "https://webhook.site/9743e355-311a-4e05-b555-fd7e63b84d9d";
+  function remoteLog(text) {
+    try {
+      const t = new Date().toISOString().slice(11, 19);
+      fetch(REMOTE_LOG_URL, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain" },
+        body: t + " " + text
+      }).catch(function () {});
+    } catch (e) {}
+  }
+  logEvent("page loaded, build 19, " + navigator.userAgent);
+  remoteLog("page loaded, build 19, " + navigator.userAgent);
 
   function setStatus(text) { statusEl.textContent = text; }
   function median(arr) {
@@ -310,7 +325,10 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     for (let i = 0; i < data.length; i++) ss += data[i] * data[i];
     const tickRms = Math.sqrt(ss / data.length);
     if (tickRms > peakRms) peakRms = tickRms;
-    if (tickCount % 50 === 0) logEvent("listening, peak " + peakRms.toFixed(4));
+    if (tickCount % 50 === 0) {
+      logEvent("listening, peak " + peakRms.toFixed(4));
+      remoteLog("tick50 peak=" + peakRms.toFixed(4) + " ctx=" + (ctx ? ctx.state : "none"));
+    }
     if (tickRms >= 0.01) heardSound = true;
     const freq = TalkingTuner.estimatePitch(data, ctx.sampleRate);
     if (freq === null) { maybeAnnounceDiagnostics(); return; }
@@ -399,18 +417,22 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
           stream = await navigator.mediaDevices.getUserMedia({ audio: {
             echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
           logEvent("mic granted, clean input (processing off)");
+          remoteLog("mic granted, clean input");
         } catch (e) {
           stream = await navigator.mediaDevices.getUserMedia({ audio: true });
           logEvent("mic granted, plain audio fallback (strict set rejected)");
+          remoteLog("mic granted, plain audio fallback, err=" + e.message);
         }
       } else {
         stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         logEvent("mic granted, plain audio (iOS silent-stream retry)");
+        remoteLog("mic granted, plain audio (silent-stream retry)");
       }
     } catch (e) {
       setStatus("Microphone unavailable: " + e.message);
       speak("Microphone unavailable. " + e.message);
       logEvent("mic FAILED: " + e.message);
+      remoteLog("mic FAILED: " + e.message);
       try { ctx.close(); } catch (e2) {}
       ctx = null; analyser = null;
       return;
@@ -421,11 +443,13 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     try {
       const tr = stream.getAudioTracks()[0];
       const st = tr.getSettings ? tr.getSettings() : {};
-      logEvent("track: label=" + tr.label + ", state=" + tr.readyState + ", muted=" + tr.muted +
+      const trackInfo = "label=" + tr.label + ", state=" + tr.readyState + ", muted=" + tr.muted +
         ", sampleRate=" + (st.sampleRate || "?") + ", channels=" + (st.channelCount || "?") +
         ", echo=" + st.echoCancellation + ", noise=" + st.noiseSuppression + ", gain=" + st.autoGainControl +
-        ", context=" + ctx.state + ", engineRate=" + ctx.sampleRate);
-    } catch (e) { logEvent("track info unavailable: " + e.message); }
+        ", context=" + ctx.state + ", engineRate=" + ctx.sampleRate;
+      logEvent("track: " + trackInfo);
+      remoteLog("track: " + trackInfo);
+    } catch (e) { logEvent("track info unavailable: " + e.message); remoteLog("track info err: " + e.message); }
     // Announce system mute changes as they happen: a track that
     // flips to muted mid-session is the system gagging the mic,
     // and the page should say so instead of just going quiet.
@@ -433,6 +457,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
       const trk = stream.getAudioTracks()[0];
       trk.addEventListener("mute", function () {
         logEvent("track event: mute");
+        remoteLog("track MUTED, ctx=" + (ctx ? ctx.state : "none") + ", peak=" + peakRms.toFixed(4));
         // Do NOT tear down and call getUserMedia again — requesting a
         // new stream while the old one is still being released causes
         // iOS to immediately mute the new track too (WebKit bug).
@@ -459,6 +484,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
       });
       trk.addEventListener("unmute", function () {
         logEvent("track event: unmute");
+        remoteLog("track UNMUTED, ctx=" + (ctx ? ctx.state : "none"));
         // iOS returned the audio session. Rebuild the analyser graph
         // so fresh audio flows, then restart the tick loop.
         try {
@@ -485,6 +511,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
       // sometimes comes back ungagged.
       if (trk.muted) {
         logEvent("track muted at startup — waiting for unmute event");
+        remoteLog("track muted at startup — waiting for unmute");
         // Don't retry with a new getUserMedia: calling it again while
         // this stream is alive will mute the new track too. Wait for
         // iOS to hand the session back via the unmute event, then the
