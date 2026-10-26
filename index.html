@@ -26,7 +26,7 @@ phone. Nothing is sent anywhere.</p>
   <button id=”copyLink” aria-label=”Copy tuner link”>Copy tuner link</button>
   <button id=”openSafari” aria-label=”Open in Safari”>Open in Safari</button>
 </p>
-<p class=”note” id=”buildTag”>Talking Tuner, build 20.</p>
+<p class=”note” id=”buildTag”>Talking Tuner, build 21.</p>
 <p>
   <button id="guitarBtn" aria-label="Guitar" aria-pressed="true">Guitar</button>
   <button id="ukeBtn" aria-label="Tenor ukulele" aria-pressed="false">Tenor ukulele</button>
@@ -238,7 +238,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
       }).catch(function () {});
     } catch (e) {}
   }
-  logEvent("page loaded, build 20, " + navigator.userAgent);
+  logEvent("page loaded, build 21, " + navigator.userAgent);
   remoteLog("page loaded, build 19, " + navigator.userAgent);
 
   function setStatus(text) { statusEl.textContent = text; }
@@ -267,6 +267,24 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
         osc.start(t); osc.stop(t + 1.0);
       });
     } catch (e) { /* no ding: the spoken "in tune" still carries it */ }
+  }
+  // Start-listening chime, after RayBridge: two rising sine notes,
+  // 660 Hz then 880 Hz. Deliberately different from the in-tune ding
+  // above so the two signals can never be confused by ear.
+  function playListeningChime() {
+    if (!ctx) return;
+    try {
+      const t = ctx.currentTime;
+      [[660, 0.0, 0.18], [880, 0.2, 0.3]].forEach(function (note) {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "sine"; osc.frequency.value = note[0];
+        gain.gain.setValueAtTime(0.25, t + note[1]);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + note[1] + note[2]);
+        osc.connect(gain); gain.connect(ctx.destination);
+        osc.start(t + note[1]); osc.stop(t + note[1] + note[2] + 0.05);
+      });
+    } catch (e) { /* no chime: the spoken announcement still carries it */ }
   }
   // Spoken diagnostics, once per listening session, so a silent
   // failure can never hide again: silence means no audio reaches
@@ -414,7 +432,9 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
       return;
     }
     setStatus("Asking for the microphone…");
-    speak("Asking for the microphone.");
+    // Do not speak before getUserMedia: the spoken announcement
+    // overlaps the mic request on iOS and the capture track comes
+    // up muted. The screen status carries this.
     try {
       // Clean mic input: the browser's voice processing (echo
       // cancellation, noise suppression, auto gain) is built for
@@ -477,7 +497,8 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
         // audio session via the unmute event.
         if (timer) { clearInterval(timer); timer = null; }
         setStatus("Microphone interrupted. Waiting for it to come back…");
-        speak("Microphone interrupted. Waiting.");
+        // No speech while waiting for unmute — an utterance here can
+        // re-interrupt the session we are waiting to get back.
         // Watchdog: if unmute hasn't fired in 12 seconds, do ONE clean
         // restart with a proper delay so iOS can fully release the session.
         muteRetryCount++;
@@ -527,7 +548,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
         // iOS to hand the session back via the unmute event, then the
         // unmute handler below will rebuild the analyser graph.
         setStatus("Microphone is busy. Waiting for it to free up…");
-        speak("Microphone is busy. Waiting.");
+        // No speech while waiting for unmute (see above).
         // Fall through — the unmute listener is added below and will
         // restart the analyser when the session is returned.
       }
@@ -551,7 +572,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     maybeStartTick();
     if (!timer) {
       setStatus("Microphone ready. Waiting for audio session to clear…");
-      speak("Ready. Waiting for audio session.");
+      // No speech while waiting for the session (see above).
       remoteLog("startListening: tick deferred, ctx=" + (ctx ? ctx.state : "none") +
         ", muted=" + (stream && stream.getAudioTracks()[0] ? stream.getAudioTracks()[0].muted : "?"));
     }
@@ -571,7 +592,12 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     remoteLog("maybeStartTick: STARTING tick loop");
     timer = setInterval(tick, 100);
     setStatus("Listening… play a string.");
-    speak("Listening. Play a string.");
+    // The listener is blind: hearing that listening started is not
+    // optional. RayBridge pattern — rising 660→880 chime, then the
+    // spoken announcement. Both fire here, after the mic is granted
+    // and the tick is running, so neither overlaps the mic request.
+    playListeningChime();
+    setTimeout(function () { if (timer) speak("Listening. Play a string."); }, 500);
     startBtn.disabled = true;
     stopBtn.disabled = false;
   }
