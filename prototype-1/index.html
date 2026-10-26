@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Talking Tuner — VoiceOver review prototype</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { max-width: 38rem; margin: 2rem auto; padding: 0 1rem 3rem; line-height: 1.5; }
+    h1 { line-height: 1.2; }
+    button, select { font: inherit; padding: .8rem; min-height: 48px; margin: .3rem .3rem .3rem 0; }
+    button:focus-visible, select:focus-visible, summary:focus-visible { outline: 4px solid #297bd9; outline-offset: 3px; }
+    label { display: block; margin-top: .8rem; font-weight: 600; }
+    #reading { font-size: 1.7rem; font-weight: 700; min-height: 3rem; }
+    #feedback { border-left: .3rem solid #297bd9; padding-left: .8rem; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8rem; }
+  </style>
+</head>
+<body>
+  <h1>Talking Tuner</h1>
+  <p id="build">VoiceOver review prototype 1. Not yet validated on an iPhone.</p>
+  <p>Keep VoiceOver enabled. Choose Start listening, then play one string.
+    Feedback uses VoiceOver. This version adds no separate voice or ding.</p>
+  <p>Audio is analyzed on this device and is not recorded or uploaded. A small diagnostic log,
+    containing states and numeric levels but no audio, stays in this browser until cleared.</p>
+  <label for="instrument">Instrument</label>
+  <select id="instrument">
+    <option value="guitar">Guitar, standard tuning</option>
+    <option value="ukulele">Tenor ukulele, high G</option>
+  </select>
+  <label for="inputMode">Microphone input setting</label>
+  <select id="inputMode" aria-describedby="inputHelp">
+    <option value="standard">Standard</option>
+    <option value="clean">Music — request processing off</option>
+  </select>
+  <p id="inputHelp">Start with Standard. If it stays silent, Stop, choose Music, then Start again.
+    The browser may choose different settings; the diagnostic log reports the result.</p>
+  <label for="feedbackMode">VoiceOver tuning feedback</label>
+  <select id="feedbackMode">
+    <option value="automatic">Automatic, when the reading changes</option>
+    <option value="requested">Only when I request it</option>
+  </select>
+  <p>
+    <button id="start">Start listening</button>
+    <button id="stop" disabled>Stop listening</button>
+    <button id="resume" disabled>Resume audio</button>
+  </p>
+  <p id="status">Ready. Choose Start listening.</p>
+  <p id="reading">No current string reading.</p>
+  <p>
+    <button id="readReading">Read current string</button>
+    <button id="checkLevel">Check microphone status and level</button>
+  </p>
+  <p id="feedback" role="status" aria-live="polite" aria-atomic="true">Ready for VoiceOver.</p>
+  <p>Stop is available while waiting. A microphone interruption gets at most 12 seconds to recover.
+    A timed-out permission request cannot be canceled by the page; late results are safely released.</p>
+  <details>
+    <summary>Local diagnostic log</summary>
+    <p>The log identifies this prototype and each listening attempt. It survives refresh on this browser.
+      Show or download it for an approved review session. No copy and paste is needed.</p>
+    <button id="showLog">Show diagnostic log</button>
+    <button id="downloadLog">Download diagnostic log</button>
+    <button id="clearLog">Clear stored diagnostic log</button>
+    <pre id="diagnostics" tabindex="0" aria-label="Diagnostic log"></pre>
+  </details>
+<script>
+// Talking tuner pitch detector — browser + Node.
+// YIN (de Cheveigné & Kawahara 2002): difference function plus
+// cumulative-mean-normalized difference, first dip below threshold.
+// Far more forgiving on real instruments than plain autocorrelation:
+// a decaying guitar note rarely holds a 0.8 correlation peak, but its
+// difference-function dip stays clear. Everything runs locally.
+(function (root) {
+  const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+  const FMIN = 65, FMAX = 500, SILENCE_RMS = 0.005;
+
+  // frame: array-like of audio samples. Returns frequency in Hz, or null.
+  function estimatePitch(frame, sr) {
+    const n = frame.length;
+    let mean = 0;
+    for (let i = 0; i < n; i++) mean += frame[i];
+    mean /= n;
+    const y = new Float64Array(n);
+    let ss = 0;
+    for (let i = 0; i < n; i++) { y[i] = frame[i] - mean; ss += y[i] * y[i]; }
+    const rms = Math.sqrt(ss / n);
+    if (rms < SILENCE_RMS) return null;
+    const minLag = Math.max(1, Math.floor(sr / FMAX));
+    const maxLag = Math.min(n - 2, Math.floor(sr / FMIN));
+    // Difference function d(tau) for every candidate period.
+    const diff = new Float64Array(maxLag + 1);
+    for (let tau = 1; tau <= maxLag; tau++) {
+      let s = 0;
+      for (let j = 0; j + tau < n; j++) {
+        const d = y[j] - y[j + tau];
+        s += d * d;
+      }
+      diff[tau] = s;
+    }
+    // Cumulative mean normalized difference: d'(tau) = d(tau) /
+    // (mean of d(1..tau)). Near 1 for aperiodic sound, near 0 at
+    // the true period.
+    const cmnd = new Float64Array(maxLag + 1);
+    let running = 0;
+    for (let tau = 1; tau <= maxLag; tau++) {
+      running += diff[tau];
+      cmnd[tau] = running > 0 ? diff[tau] / (running / tau) : 1;
+    }
+    // First LOCAL MINIMUM below the absolute threshold — not the
+    // first crossing, which sits on the slow descent well before
+    // the true dip (that bug read every string flat). Fall back to
+    // the deepest dip if no minimum crosses it, rejecting unclear
+    // frames.
+    let tau = -1;
+    for (let t = minLag + 1; t < maxLag; t++) {
+      if (cmnd[t] < 0.15 && cmnd[t] <= cmnd[t - 1] && cmnd[t] <= cmnd[t + 1]) { tau = t; break; }
+    }
+    if (tau === -1) {
+      let best = Infinity;
+      for (let t = minLag; t <= maxLag; t++) {
+        if (cmnd[t] < best) { best = cmnd[t]; tau = t; }
+      }
+      if (best > 0.4) return null;
+    }
+    // Parabolic interpolation on the CMND curve around the dip.
+    let shift = 0;
+    if (tau > minLag && tau < maxLag) {
+      const a = cmnd[tau - 1], b = cmnd[tau], c = cmnd[tau + 1];
+      const denom = a - 2 * b + c;
+      if (denom !== 0) shift = 0.5 * (a - c) / denom;
+    }
+    return sr / (tau + shift);
+  }
+
+  function freqToNote(freq) {
+    const midiFloat = 69 + 12 * Math.log2(freq / 440);
+    const nearest = Math.round(midiFloat);
+    const cents = Math.round(100 * (midiFloat - nearest));
+    const name = NOTE_NAMES[((nearest % 12) + 12) % 12] + (Math.floor(nearest / 12) - 1);
+    return { name, cents };
+  }
+
+  function describe(freq) {
+    const { name, cents } = freqToNote(freq);
+    if (cents === 0) return name + ", in tune";
+    return name + ", " + Math.abs(cents) + " cents " + (cents > 0 ? "sharp" : "flat");
+  }
+
+  // Strings the tuner names, with standard frequencies in Hz.
+  // Guitar: low to high. Ukulele: tenor, standard high-G tuning.
+  const IN_TUNE_CENTS = 5;
+  const GUITAR_STRINGS = [
+    { label: "low E string", freq: 82.4069 },
+    { label: "A string", freq: 110.0 },
+    { label: "D string", freq: 146.8324 },
+    { label: "G string", freq: 195.9977 },
+    { label: "B string", freq: 246.9417 },
+    { label: "high E string", freq: 329.6276 },
+  ];
+  const UKULELE_TENOR = [
+    { label: "G string", freq: 391.9954 },
+    { label: "C string", freq: 261.6256 },
+    { label: "E string", freq: 329.6276 },
+    { label: "A string", freq: 440.0 },
+  ];
+
+  function nearestString(freq, strings) {
+    let best = null, bestAbs = Infinity;
+    for (const s of strings) {
+      const cents = Math.round(1200 * Math.log2(freq / s.freq));
+      if (Math.abs(cents) < bestAbs) { bestAbs = Math.abs(cents); best = { label: s.label, cents }; }
+    }
+    return best;
+  }
+
+  // Spoken feedback, modeled on Buck's own tuner: the string name,
+  // then low or high, and "in tune" within a small window.
+  function describeString(freq, strings) {
+    const { label, cents } = nearestString(freq, strings);
+    if (Math.abs(cents) <= IN_TUNE_CENTS) return label + ", in tune";
+    return label + ", " + (cents > 0 ? "high" : "low");
+  }
+
+  function describeGuitar(freq) { return describeString(freq, GUITAR_STRINGS); }
+  function describeUkulele(freq) { return describeString(freq, UKULELE_TENOR); }
+  // Distance in cents from the nearest string of the instrument.
+  // A tuner reading hundreds of cents from every string is noise
+  // (mains hum sits far below low E), not a string being tuned.
+  function centsToNearestString(freq, instrument) {
+    const strings = instrument === "ukulele" ? UKULELE_TENOR : GUITAR_STRINGS;
+    let best = Infinity;
+    for (const s of strings) {
+      const cents = Math.abs(Math.round(1200 * Math.log2(freq / s.freq)));
+      if (cents < best) best = cents;
+    }
+    return best;
+  }
+
+  const api = { estimatePitch, freqToNote, describe, describeGuitar, describeUkulele, centsToNearestString, GUITAR_STRINGS, UKULELE_TENOR };
+  if (typeof module !== "undefined" && module.exports) module.exports = api;
+  root.TalkingTuner = api;
+})(typeof self !== "undefined" ? self : this);
+</script>
+<script>
+/* Capture lifecycle for the isolated review prototype. No network or output audio. */
+(function (root) {
+  "use strict";
+  const BUILD = "voiceover-prototype-1";
+  function createTuner(env) {
+    const clock = env.clock || { now: () => performance.now(), setInterval, clearInterval, setTimeout, clearTimeout };
+    const emit = (name, details = {}) => env.onEvent?.({ event: name, ...details });
+    let current = null, serial = 0, pending = 0, closing = 0, releaseFailed = false, releaseMessage = "";
+    let state = "idle", message = "Ready. Choose Start listening.";
+    let instrument = "guitar", inputMode = "standard", lastReading = null;
+    const settings = track => {
+      const all = track.getSettings?.() || {};
+      return Object.fromEntries(["sampleRate", "channelCount", "echoCancellation", "noiseSuppression", "autoGainControl"]
+        .filter(key => key in all).map(key => [key, all[key]]));
+    };
+    function snapshot() {
+      const s = current;
+      return { build: BUILD, state, message, session: s?.id || null, instrument, inputMode,
+        canStart: !s && pending === 0 && closing === 0 && !releaseFailed,
+        canStop: !!s, canResume: !!s?.track && s.ctx.state !== "running", pending, closing,
+        context: s?.ctx?.state || "none", contextTime: s?.ctx?.currentTime ?? null,
+        track: s?.track?.readyState || "none", muted: s?.track?.muted ?? null,
+        frames: s?.frames || 0, changedFrames: s?.changedFrames || 0, rms: s?.rms ?? null, peak: s?.peak ?? null,
+        pitchHz: s?.pitchHz ?? null, lastReading };
+    }
+    function publish(next = state, text = message) {
+      if (releaseFailed) { next = "error"; text = releaseMessage; }
+      const changed = state !== next || message !== text;
+      state = next; message = text;
+      if (changed) emit("state", { state, message, session: current?.id || null });
+      env.onState?.(snapshot());
+    }
+    function observe(s, target, type, handler) {
+      const owned = () => { if (current === s) handler(); };
+      target.addEventListener(type, owned);
+      s.listeners.push(() => target.removeEventListener(type, owned));
+    }
+    function clearReading(s) {
+      s.recent = []; s.pitchHz = null;
+      lastReading = null;
+    }
+    function release(s) {
+      if (!s || s.released) return;
+      s.released = true;
+      if (current === s) current = null;
+      clock.clearInterval(s.monitor);
+      clock.clearTimeout(s.acquireTimeout);
+      s.listeners.forEach(remove => remove());
+      s.stream?.getTracks().forEach(track => track.stop());
+      [s.source, s.analyser, s.gain].forEach(node => { try { node?.disconnect(); } catch (_) {} });
+      clearReading(s);
+      if (s.ctx && s.ctx.state !== "closed") {
+        closing++;
+        // Closing can fail too. Never start overlapping sessions after an unknown release.
+        const deadline = clock.setTimeout(() => {
+          releaseFailed = true;
+          releaseMessage = "Audio release did not finish. Reload this page before trying again.";
+          publish("error", releaseMessage);
+        }, 3000);
+        try {
+          Promise.resolve(s.ctx.close()).then(() => {
+            clock.clearTimeout(deadline); closing--;
+            emit("context-closed", { session: s.id }); publish();
+          }, error => {
+            clock.clearTimeout(deadline); closing--; releaseFailed = true;
+            releaseMessage = "Audio release failed. Reload this page before trying again.";
+            emit("close-error", { name: error.name, session: s.id });
+            publish("error", "Audio release failed. Reload this page before trying again.");
+          });
+        } catch (error) {
+          clock.clearTimeout(deadline); closing--; releaseFailed = true;
+          releaseMessage = "Audio release failed. Reload this page before trying again.";
+          emit("close-error", { name: error.name, session: s.id });
+          publish("error", "Audio release failed. Reload this page before trying again.");
+        }
+      }
+    }
+    function fail(s, text, event) {
+      if (current !== s) return;
+      emit(event, { session: s.id, ...snapshot() });
+      release(s); publish("error", text);
+    }
+    function requestResume(s, reason) {
+      // Called only on Start or the explicit Resume button, never from a tick loop.
+      emit("resume-request", { session: s.id, reason, context: s.ctx.state });
+      try {
+        Promise.resolve(s.ctx.resume()).then(() => {
+          if (current === s) { emit("resume-settled", { session: s.id, context: s.ctx.state }); reconcile(s); }
+        }, error => {
+          if (current === s) { emit("resume-error", { name: error.name, session: s.id }); reconcile(s); }
+        });
+      } catch (error) { emit("resume-error", { name: error.name, session: s.id }); }
+    }
+    function reconcile(s) {
+      if (current !== s || !s.track) return;
+      if (s.track.readyState === "ended") {
+        fail(s, "Microphone ended. Choose Start listening to try again.", "track-ended"); return;
+      }
+      if (s.ctx.state === "closed") {
+        fail(s, "Audio engine closed. Choose Start listening to try again.", "context-ended"); return;
+      }
+      const ready = s.ctx.state === "running" && !s.track.muted;
+      if (!ready) {
+        if (s.blockedAt === null) s.blockedAt = clock.now();
+        clearReading(s); s.rms = null;
+        publish("waiting", s.track.muted
+          ? "Microphone interrupted. Waiting up to 12 seconds. Stop is available."
+          : "Audio engine paused. Choose Resume audio, or Stop. Waiting up to 12 seconds.");
+        if (clock.now() - s.blockedAt >= 12000) {
+          fail(s, "Microphone did not recover. Choose Start listening to try again.", "recovery-timeout");
+        }
+      } else {
+        if (s.blockedAt !== null) {
+          emit("recovered", { session: s.id });
+          s.signalSince = clock.now(); s.lastSignalAt = clock.now();
+        }
+        s.blockedAt = null;
+        if (state === "waiting" || state === "requesting") {
+          publish("listening", "Audio path ready. Play one string to check the input.");
+        }
+      }
+    }
+    function sample(s) {
+      if (current !== s || !s.track) return;
+      reconcile(s);
+      if (current !== s) return;
+      const now = clock.now();
+      if (s.blockedAt === null) {
+        try {
+          s.analyser.getFloatTimeDomainData(s.frame);
+          s.frames++;
+          let sum = 0, signature = 0;
+          for (let i = 0; i < s.frame.length; i++) {
+            sum += s.frame[i] * s.frame[i];
+            if (i % 64 === 0) signature += s.frame[i] * (i + 1);
+          }
+          if (s.signature !== undefined && signature !== s.signature) s.changedFrames++;
+          s.signature = signature;
+          s.rms = Math.sqrt(sum / s.frame.length); s.peak = Math.max(s.peak, s.rms);
+          const freq = env.pitch.estimatePitch(s.frame, s.ctx.sampleRate);
+          s.pitchHz = freq;
+          if (s.rms >= 0.005) {
+            s.lastSignalAt = now;
+            if (state === "silent") publish("listening", "Input signal detected. Play one string.");
+          }
+          if (freq && env.pitch.centsToNearestString(freq, instrument) <= 300) {
+            if (s.recent.length && Math.abs(freq - s.recent[0]) / s.recent[0] > 0.03) s.recent = [];
+            s.recent.push(freq); if (s.recent.length > 5) s.recent.shift();
+            if (s.recent.length === 5) {
+              const median = s.recent.slice().sort((a, b) => a - b)[2];
+              const text = instrument === "guitar" ? env.pitch.describeGuitar(median) : env.pitch.describeUkulele(median);
+              lastReading = { text, hz: median, at: now, session: s.id };
+              s.lastPitchAt = now;
+              if (message.includes("no stable string pitch")) publish("listening", "Input and string pitch detected.");
+              env.onReading?.(lastReading);
+            }
+          } else {
+            s.recent = [];
+            if (lastReading && now - lastReading.at > 1000) lastReading = null;
+          }
+          if (now - s.lastSignalAt >= 8000) {
+            publish("silent", "No measurable input for 8 seconds. Play a string nearby, or stop and try the other input setting.");
+          } else if (now - s.signalSince >= 8000 && now - s.lastPitchAt >= 8000 && s.rms >= 0.005) {
+            publish("listening", "Input signal detected, but no stable string pitch. Play one string at a time.");
+          }
+        } catch (error) { fail(s, "Audio analysis failed. Choose Start listening to try again.", "analysis-error"); return; }
+      }
+      if (now - s.lastSnapshot >= 1000) {
+        s.lastSnapshot = now;
+        emit("sample", snapshot()); env.onState?.(snapshot());
+      }
+    }
+    function start() {
+      if (!snapshot().canStart) { emit("start-ignored", snapshot()); return false; }
+      if (!env.mediaDevices?.getUserMedia || !env.AudioContext) {
+        publish("error", "Microphone unavailable. Open this page in Safari over HTTPS."); return false;
+      }
+      const s = { id: ++serial, listeners: [], released: false, blockedAt: null, frames: 0, changedFrames: 0,
+        rms: null, peak: 0, pitchHz: null, recent: [], lastSnapshot: 0, signalSince: clock.now(),
+        lastSignalAt: clock.now(), lastPitchAt: clock.now() };
+      current = s; lastReading = null;
+      publish("requesting", "Requesting microphone access. Stop cancels this attempt.");
+      try {
+        // Both activation-sensitive calls occur before any await in this click handler.
+        s.ctx = new env.AudioContext();
+        observe(s, s.ctx, "statechange", () => {
+          emit("context-state", { session: s.id, context: s.ctx.state }); reconcile(s);
+        });
+        requestResume(s, "start-gesture");
+        const constraints = inputMode === "clean" ? { audio: {
+          echoCancellation: false, noiseSuppression: false, autoGainControl: false } } : { audio: true };
+        emit("capture-request", { session: s.id, inputMode, constraints });
+        const acquisition = env.mediaDevices.getUserMedia(constraints);
+        pending++;
+        s.acquireTimeout = clock.setTimeout(() => {
+          fail(s, "Microphone request did not finish. Resolve any Safari prompt. Reload if it remains pending.", "request-timeout");
+        }, 20000);
+        Promise.resolve(acquisition).then(stream => {
+          pending--; clock.clearTimeout(s.acquireTimeout);
+          if (current !== s) {
+            stream.getTracks().forEach(track => track.stop());
+            emit("late-stream-stopped", { session: s.id }); publish(); return;
+          }
+          s.stream = stream;
+          try {
+            s.track = stream.getAudioTracks()[0];
+            if (!s.track) throw new Error("No audio track");
+            s.analyser = s.ctx.createAnalyser(); s.analyser.fftSize = 4096;
+            s.frame = new Float32Array(s.analyser.fftSize);
+            s.source = s.ctx.createMediaStreamSource(stream);
+            s.gain = s.ctx.createGain(); s.gain.gain.value = 0;
+            s.source.connect(s.analyser); s.analyser.connect(s.gain); s.gain.connect(s.ctx.destination);
+            emit("capture-granted", { session: s.id, context: s.ctx.state,
+              track: s.track.readyState, muted: s.track.muted, settings: settings(s.track), engineRate: s.ctx.sampleRate });
+            for (const name of ["mute", "unmute", "ended"]) observe(s, s.track, name, () => {
+              emit("track-" + name, { session: s.id, context: s.ctx.state, muted: s.track.muted }); reconcile(s);
+            });
+            s.signalSince = s.lastSignalAt = s.lastPitchAt = clock.now();
+            // Monitor even an initially muted track or interrupted context.
+            s.monitor = clock.setInterval(() => sample(s), 100);
+            reconcile(s);
+          } catch (error) { fail(s, "Could not connect the microphone. Choose Start listening to try again.", "graph-error"); }
+        }, error => {
+          pending--; clock.clearTimeout(s.acquireTimeout);
+          if (current !== s) { emit("late-request-rejected", { session: s.id, name: error.name }); publish(); return; }
+          emit("capture-rejected", { session: s.id, name: error.name });
+          const text = error.name === "NotAllowedError" ? "Microphone access was not granted. Start can request it again when access is available."
+            : "Microphone request failed (" + error.name + "). Choose another input setting, then Start to retry.";
+          release(s); publish("error", text);
+        });
+      } catch (error) {
+        emit("start-error", { session: s.id, name: error.name });
+        release(s); publish("error", "Audio setup failed. Choose Start listening to try again.");
+      }
+      return true;
+    }
+    function stop(reason = "stop-gesture") {
+      const s = current;
+      if (s) { emit("stop", { session: s.id, reason, ...snapshot() }); release(s); }
+      publish("idle", pending ? "Stopped. Safari's pending request must finish before another attempt." : "Stopped. Choose Start listening when ready.");
+    }
+    function resume() {
+      if (current?.track) requestResume(current, "resume-gesture");
+    }
+    function configure(next) {
+      if (!snapshot().canStart) return false;
+      if (next.instrument) instrument = next.instrument === "ukulele" ? "ukulele" : "guitar";
+      if (next.inputMode) inputMode = next.inputMode === "clean" ? "clean" : "standard";
+      lastReading = null; emit("configuration", { instrument, inputMode }); publish(); return true;
+    }
+    return { start, stop, resume, configure, snapshot };
+  }
+  const api = { BUILD, createTuner };
+  if (typeof module !== "undefined" && module.exports) module.exports = api;
+  root.TunerLifecycle = api;
+})(typeof self !== "undefined" ? self : this);
+</script>
+<script>
+(function () {
+  "use strict";
+  const byId = id => document.getElementById(id);
+  const STORAGE_KEY = "talking-tuner-voiceover-prototype-diagnostics-v1";
+  const MAX_EVENTS = 400;
+  let entries = [], sequence = 0, storageAvailable = true, saveTimer = null;
+  const run = new Date().toISOString();
+  try {
+    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+    if (Array.isArray(stored)) entries = stored.slice(-MAX_EVENTS);
+  } catch (_) { storageAvailable = false; }
+  function save() {
+    saveTimer = null;
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(entries)); }
+    catch (_) { storageAvailable = false; }
+  }
+  function log(event) {
+    entries.push({ build: TunerLifecycle.BUILD, run, sequence: ++sequence,
+      elapsedMs: Math.round(performance.now()), ...event });
+    if (entries.length > MAX_EVENTS) entries.shift();
+    if (!saveTimer) saveTimer = setTimeout(save, 500);
+  }
+  let feedbackTimer = null, lastAutoText = "", lastAutoAt = -Infinity;
+  const announced = new Set();
+  function announce(text, explicit = false) {
+    clearTimeout(feedbackTimer);
+    // One atomic polite live region. The page does not call speechSynthesis.
+    if (explicit && byId("feedback").textContent === text) {
+      byId("feedback").textContent = "";
+      feedbackTimer = setTimeout(() => { byId("feedback").textContent = text; }, 100);
+    } else byId("feedback").textContent = text;
+    log({ event: "announcement-requested", text, explicit, mode: byId("feedbackMode").value });
+  }
+  function render(s) {
+    byId("start").disabled = !s.canStart;
+    byId("stop").disabled = !s.canStop;
+    byId("resume").disabled = !s.canResume;
+    byId("instrument").disabled = !s.canStart;
+    byId("inputMode").disabled = !s.canStart;
+    byId("status").textContent = s.message;
+    byId("reading").textContent = s.lastReading?.text || "No current string reading.";
+    // Waiting/recovery announcements must not make a speech/interruption loop.
+    // Announce waiting at most once per attempt; recovery stays readable on request.
+    const key = [s.session, s.state, s.state === "waiting" ? "" : s.message].join(":");
+    if (byId("feedbackMode").value === "automatic" && !announced.has(key) && s.state !== "listening") {
+      announced.add(key); announce(s.message);
+    }
+  }
+  const tuner = TunerLifecycle.createTuner({
+    mediaDevices: navigator.mediaDevices,
+    AudioContext: window.AudioContext || window.webkitAudioContext,
+    pitch: TalkingTuner,
+    onEvent: log,
+    onState: render,
+    onReading: reading => {
+      byId("reading").textContent = reading.text;
+      if (byId("feedbackMode").value !== "automatic") return;
+      const now = performance.now();
+      if (reading.text !== lastAutoText && now - lastAutoAt >= 2500) {
+        lastAutoText = reading.text; lastAutoAt = now; announce(reading.text);
+      }
+    }
+  });
+  byId("start").addEventListener("click", () => {
+    if (!tuner.snapshot().canStart) return;
+    lastAutoText = ""; lastAutoAt = -Infinity; announced.clear();
+    tuner.start();
+  });
+  byId("stop").addEventListener("click", () => tuner.stop());
+  byId("resume").addEventListener("click", () => tuner.resume());
+  for (const key of ["instrument", "inputMode"]) byId(key).addEventListener("change", () => {
+    tuner.configure({ [key]: byId(key).value });
+  });
+  byId("feedbackMode").addEventListener("change", () => {
+    log({ event: "feedback-mode", value: byId("feedbackMode").value });
+  });
+  byId("readReading").addEventListener("click", () => {
+    const s = tuner.snapshot();
+    const fresh = s.lastReading && performance.now() - s.lastReading.at <= 1000;
+    announce(fresh ? s.lastReading.text : "No current string reading. " + s.message, true);
+  });
+  byId("checkLevel").addEventListener("click", () => {
+    const s = tuner.snapshot();
+    const measured = s.rms === null ? "No current sample." : "Current level " + s.rms.toFixed(4) + ". Peak " + s.peak.toFixed(4) + ".";
+    announce(s.message + " " + measured + " Context " + s.context + ". Track " + s.track +
+      ". Muted " + s.muted + ". " + s.frames + " sampled frames.", true);
+    log({ event: "manual-status", ...s });
+  });
+  function diagnosticText() {
+    return JSON.stringify({ build: TunerLifecycle.BUILD, baseRevision: "8811f77ccc95051d65da7de119b8da0df173871c",
+      exportedAt: new Date().toISOString(), storageAvailable, state: tuner.snapshot(), events: entries }, null, 2);
+  }
+  byId("showLog").addEventListener("click", () => {
+    byId("diagnostics").textContent = diagnosticText();
+    announce("Diagnostic log shown below. " + (storageAvailable ? "Stored locally." : "Browser storage is unavailable; keep this page open."), true);
+  });
+  byId("downloadLog").addEventListener("click", () => {
+    const blob = new Blob([diagnosticText()], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url; link.download = "talking-tuner-" + TunerLifecycle.BUILD + ".json";
+    document.body.appendChild(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    announce("Diagnostic download requested. No log was uploaded.", true);
+  });
+  byId("clearLog").addEventListener("click", () => {
+    clearTimeout(saveTimer); saveTimer = null; entries = [];
+    try { localStorage.removeItem(STORAGE_KEY); storageAvailable = true; } catch (_) { storageAvailable = false; }
+    byId("diagnostics").textContent = "";
+    announce("Stored diagnostic log cleared. New events may be logged.", true);
+  });
+  document.addEventListener("visibilitychange", () => {
+    log({ event: "visibility", value: document.visibilityState });
+    if (document.visibilityState === "hidden") { tuner.stop("page-hidden"); save(); }
+  });
+  window.addEventListener("pagehide", () => { tuner.stop("pagehide"); save(); });
+  window.addEventListener("pageshow", event => {
+    log({ event: "pageshow", persisted: event.persisted }); render(tuner.snapshot());
+  });
+  log({ event: "page-loaded", userAgent: navigator.userAgent, secureContext: window.isSecureContext,
+    visibility: document.visibilityState, timeOrigin: performance.timeOrigin });
+  render(tuner.snapshot());
+})();
+</script>
+</body>
+</html>
