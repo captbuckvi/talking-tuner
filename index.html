@@ -26,7 +26,7 @@ phone. Nothing is sent anywhere.</p>
   <button id=”copyLink” aria-label=”Copy tuner link”>Copy tuner link</button>
   <button id=”openSafari” aria-label=”Open in Safari”>Open in Safari</button>
 </p>
-<p class=”note” id=”buildTag”>Talking Tuner, build 15.</p>
+<p class=”note” id=”buildTag”>Talking Tuner, build 16.</p>
 <p>
   <button id="guitarBtn" aria-label="Guitar" aria-pressed="true">Guitar</button>
   <button id="ukeBtn" aria-label="Tenor ukulele" aria-pressed="false">Tenor ukulele</button>
@@ -211,6 +211,10 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
   let repeatCount = 0, autoRetried = false;
   let listenStartedAt = 0, heardSound = false, silenceAnnounced = false, noPitchAnnounced = false;
   let peakRms = 0, tickCount = 0;
+  // On iOS, requesting mic with echoCancellation:false sometimes returns
+  // a silent stream without throwing. useCleanInput tracks which mode
+  // was used so we can auto-retry with plain audio on silence.
+  let useCleanInput = true;
   // Diagnostic log: what happened, in order, so Buck can paste it
   // to Muse instead of relaying spoken numbers. No audio is stored,
   // only short text lines; nothing leaves the phone except the paste.
@@ -220,7 +224,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     diagLog.push(t + " " + text);
     if (diagLog.length > 300) diagLog.shift();
   }
-  logEvent("page loaded, build 10, " + navigator.userAgent);
+  logEvent("page loaded, build 16, " + navigator.userAgent);
 
   function setStatus(text) { statusEl.textContent = text; }
   function median(arr) {
@@ -257,9 +261,26 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     const elapsed = Date.now() - listenStartedAt;
     if (!silenceAnnounced && !heardSound && elapsed > 3000) {
       silenceAnnounced = true;
+      logEvent("diagnostic: silence, peak " + peakRms.toFixed(4) + ", ctx=" + (ctx ? ctx.state : "none") + ", cleanInput=" + useCleanInput);
+      // iOS often returns a silent stream when audio processing is
+      // disabled (echoCancellation:false). Auto-retry once with plain
+      // audio before giving up.
+      if (useCleanInput) {
+        useCleanInput = false;
+        setStatus("No audio detected. Retrying with standard microphone settings…");
+        speak("No audio. Retrying.");
+        logEvent("auto-retry: switching to plain audio");
+        if (timer) clearInterval(timer);
+        if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
+        if (ctx) { try { ctx.close(); } catch (e2) {} }
+        timer = null; stream = null; ctx = null;
+        startBtn.disabled = false; stopBtn.disabled = true;
+        autoRetried = false;
+        startListening();
+        return;
+      }
       setStatus("Microphone is on, but I hear silence. Loudest level so far: " + peakRms.toFixed(4) + ".");
-      speak("Microphone is on, but I hear silence. Loudest level so far: " + peakRms.toFixed(4) + ".");
-      logEvent("diagnostic: silence, peak " + peakRms.toFixed(4));
+      speak("Microphone is on, but I hear silence. Peak level " + peakRms.toFixed(4) + ". Tap Check microphone level for details.");
     } else if (!noPitchAnnounced && heardSound && elapsed > 5000) {
       noPitchAnnounced = true;
       setStatus("I hear sound, but I cannot find a pitch.");
@@ -269,6 +290,12 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
   }
   function tick() {
     tickCount++;
+    // iOS can suspend the AudioContext at any time; resume it in-place
+    // so a phone call or screen lock doesn't permanently kill the graph.
+    if (ctx && ctx.state === "suspended" && ctx.resume) {
+      ctx.resume();
+      logEvent("ctx resumed in tick");
+    }
     let data;
     if (analyser.getFloatTimeDomainData) {
       data = new Float32Array(analyser.fftSize);
@@ -363,13 +390,22 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
       // cancellation, noise suppression, auto gain) is built for
       // speech and mangles sustained musical tones, so turn it off.
       // Fall back to plain audio if a browser rejects the strict set.
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({ audio: {
-          echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
-        logEvent("mic granted, clean input (processing off)");
-      } catch (e) {
+      // On iOS, disabling echo cancellation sometimes yields a silent
+      // stream without throwing. useCleanInput is flipped to false by
+      // maybeAnnounceDiagnostics if silence is detected, so the
+      // auto-retry lands here with plain audio on the second attempt.
+      if (useCleanInput) {
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({ audio: {
+            echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+          logEvent("mic granted, clean input (processing off)");
+        } catch (e) {
+          stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          logEvent("mic granted, plain audio fallback (strict set rejected)");
+        }
+      } else {
         stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        logEvent("mic granted, plain audio fallback (strict set rejected)");
+        logEvent("mic granted, plain audio (iOS silent-stream retry)");
       }
     } catch (e) {
       setStatus("Microphone unavailable: " + e.message);
@@ -461,6 +497,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
     if (ctx) ctx.close();
     timer = null; stream = null; ctx = null;
+    useCleanInput = true;
     setStatus("Stopped.");
     logEvent("stopped, final peak " + peakRms.toFixed(4));
     startBtn.disabled = false;
@@ -480,7 +517,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     const track = stream.getAudioTracks()[0];
     const state = track ? ("track " + track.readyState + ", muted " + track.muted) : "no mic track";
     const micName = track && track.label ? track.label : "unknown microphone";
-    const msg = "Build 14. Peak level " + peakRms.toFixed(4) + ". Context " + (ctx ? ctx.state : "none") + ". " + state + ". Microphone: " + micName + ".";
+    const msg = "Build 16. Peak level " + peakRms.toFixed(4) + ". Context " + (ctx ? ctx.state : "none") + ". " + state + ". Microphone: " + micName + ". Clean input: " + useCleanInput + ".";
     setStatus(msg);
     speak(msg);
     logEvent("level check: " + msg);
@@ -494,6 +531,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
     if (ctx) ctx.close();
     timer = null; stream = null; ctx = null;
+    useCleanInput = true;
     stopBtn.disabled = true;
     startBtn.disabled = false;
     setStatus("Retrying microphone…");
