@@ -26,7 +26,7 @@ phone. Nothing is sent anywhere.</p>
   <button id=”copyLink” aria-label=”Copy tuner link”>Copy tuner link</button>
   <button id=”openSafari” aria-label=”Open in Safari”>Open in Safari</button>
 </p>
-<p class=”note” id=”buildTag”>Talking Tuner, build 16.</p>
+<p class=”note” id=”buildTag”>Talking Tuner, build 17.</p>
 <p>
   <button id="guitarBtn" aria-label="Guitar" aria-pressed="true">Guitar</button>
   <button id="ukeBtn" aria-label="Tenor ukulele" aria-pressed="false">Tenor ukulele</button>
@@ -208,7 +208,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
   });
   let ctx = null, analyser = null, stream = null, timer = null;
   let recent = [], lastSpoken = "", lastAt = 0, lastDinged = null;
-  let repeatCount = 0, autoRetried = false;
+  let repeatCount = 0, autoRetried = false, muteRetryCount = 0;
   let listenStartedAt = 0, heardSound = false, silenceAnnounced = false, noPitchAnnounced = false;
   let peakRms = 0, tickCount = 0;
   // On iOS, requesting mic with echoCancellation:false sometimes returns
@@ -224,7 +224,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     diagLog.push(t + " " + text);
     if (diagLog.length > 300) diagLog.shift();
   }
-  logEvent("page loaded, build 16, " + navigator.userAgent);
+  logEvent("page loaded, build 17, " + navigator.userAgent);
 
   function setStatus(text) { statusEl.textContent = text; }
   function median(arr) {
@@ -432,9 +432,27 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     try {
       const trk = stream.getAudioTracks()[0];
       trk.addEventListener("mute", function () {
-        setStatus("Microphone muted by the system.");
-        speak("Microphone muted by the system.");
-        logEvent("track event: mute");
+        logEvent("track event: mute, muteRetryCount=" + muteRetryCount);
+        // iOS grabs the mic back (e.g. after dictation). Retry up to 5
+        // times with a short delay rather than giving up immediately.
+        if (muteRetryCount < 5) {
+          muteRetryCount++;
+          const attempt = muteRetryCount;
+          setStatus("Microphone taken by system. Retrying (" + attempt + " of 5)…");
+          speak("Microphone taken. Retrying.");
+          logEvent("auto-retry on mute, attempt " + attempt);
+          if (timer) clearInterval(timer);
+          if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
+          if (ctx) { try { ctx.close(); } catch (e2) {} }
+          timer = null; stream = null; ctx = null;
+          startBtn.disabled = false; stopBtn.disabled = true;
+          autoRetried = false;
+          setTimeout(function () { startListening(); }, 2000);
+        } else {
+          setStatus("Microphone held by another app. Close other apps and try again.");
+          speak("Microphone held by another app. Close other apps and try again.");
+          logEvent("mute retry limit reached");
+        }
       });
       trk.addEventListener("unmute", function () {
         setStatus("Microphone unmuted.");
@@ -460,16 +478,25 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
       // If the track starts gagged, tear it down and ask once more
       // without making the user tap anything: a fresh request
       // sometimes comes back ungagged.
-      if (trk.muted && !autoRetried) {
-        autoRetried = true;
-        logEvent("auto-retry on initial mute");
-        if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
-        if (ctx) ctx.close();
-        timer = null; stream = null; ctx = null;
-        stopBtn.disabled = true;
-        startBtn.disabled = false;
-        setStatus("Microphone muted. If this opened inside an app, tap Open in Safari.");
-        speak("Microphone muted. If this page opened inside another app, tap Open in Safari.");
+      if (trk.muted) {
+        logEvent("track muted at startup, muteRetryCount=" + muteRetryCount);
+        if (muteRetryCount < 5) {
+          muteRetryCount++;
+          const attempt = muteRetryCount;
+          setStatus("Microphone busy. Retrying (" + attempt + " of 5)…");
+          speak("Microphone busy. Retrying.");
+          logEvent("auto-retry on startup mute, attempt " + attempt);
+          if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
+          if (ctx) { try { ctx.close(); } catch (e2) {} }
+          timer = null; stream = null; ctx = null;
+          stopBtn.disabled = true; startBtn.disabled = false;
+          autoRetried = false;
+          setTimeout(function () { startListening(); }, 2000);
+        } else {
+          setStatus("Microphone busy. Close other apps and try again.");
+          speak("Microphone held by another app. Close other apps and try again.");
+          logEvent("startup mute retry limit reached");
+        }
         return;
       }
     } catch (e) { logEvent("mute listeners unavailable: " + e.message); }
@@ -497,7 +524,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
     if (ctx) ctx.close();
     timer = null; stream = null; ctx = null;
-    useCleanInput = true;
+    useCleanInput = true; muteRetryCount = 0;
     setStatus("Stopped.");
     logEvent("stopped, final peak " + peakRms.toFixed(4));
     startBtn.disabled = false;
@@ -517,7 +544,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     const track = stream.getAudioTracks()[0];
     const state = track ? ("track " + track.readyState + ", muted " + track.muted) : "no mic track";
     const micName = track && track.label ? track.label : "unknown microphone";
-    const msg = "Build 16. Peak level " + peakRms.toFixed(4) + ". Context " + (ctx ? ctx.state : "none") + ". " + state + ". Microphone: " + micName + ". Clean input: " + useCleanInput + ".";
+    const msg = "Build 17. Peak level " + peakRms.toFixed(4) + ". Context " + (ctx ? ctx.state : "none") + ". " + state + ". Microphone: " + micName + ". Clean input: " + useCleanInput + ". Mute retries: " + muteRetryCount + ".";
     setStatus(msg);
     speak(msg);
     logEvent("level check: " + msg);
@@ -531,7 +558,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
     if (ctx) ctx.close();
     timer = null; stream = null; ctx = null;
-    useCleanInput = true;
+    useCleanInput = true; muteRetryCount = 0;
     stopBtn.disabled = true;
     startBtn.disabled = false;
     setStatus("Retrying microphone…");
