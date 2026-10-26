@@ -26,7 +26,7 @@ phone. Nothing is sent anywhere.</p>
   <button id=”copyLink” aria-label=”Copy tuner link”>Copy tuner link</button>
   <button id=”openSafari” aria-label=”Open in Safari”>Open in Safari</button>
 </p>
-<p class=”note” id=”buildTag”>Talking Tuner, build 17.</p>
+<p class=”note” id=”buildTag”>Talking Tuner, build 18.</p>
 <p>
   <button id="guitarBtn" aria-label="Guitar" aria-pressed="true">Guitar</button>
   <button id="ukeBtn" aria-label="Tenor ukulele" aria-pressed="false">Tenor ukulele</button>
@@ -224,7 +224,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     diagLog.push(t + " " + text);
     if (diagLog.length > 300) diagLog.shift();
   }
-  logEvent("page loaded, build 17, " + navigator.userAgent);
+  logEvent("page loaded, build 18, " + navigator.userAgent);
 
   function setStatus(text) { statusEl.textContent = text; }
   function median(arr) {
@@ -432,35 +432,35 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     try {
       const trk = stream.getAudioTracks()[0];
       trk.addEventListener("mute", function () {
-        logEvent("track event: mute, muteRetryCount=" + muteRetryCount);
-        // iOS grabs the mic back (e.g. after dictation). Retry up to 5
-        // times with a short delay rather than giving up immediately.
-        if (muteRetryCount < 5) {
-          muteRetryCount++;
-          const attempt = muteRetryCount;
-          setStatus("Microphone taken by system. Retrying (" + attempt + " of 5)…");
-          speak("Microphone taken. Retrying.");
-          logEvent("auto-retry on mute, attempt " + attempt);
-          if (timer) clearInterval(timer);
+        logEvent("track event: mute");
+        // Do NOT tear down and call getUserMedia again — requesting a
+        // new stream while the old one is still being released causes
+        // iOS to immediately mute the new track too (WebKit bug).
+        // Instead pause the tick loop and wait for iOS to return the
+        // audio session via the unmute event.
+        if (timer) { clearInterval(timer); timer = null; }
+        setStatus("Microphone interrupted. Waiting for it to come back…");
+        speak("Microphone interrupted. Waiting.");
+        // Watchdog: if unmute hasn't fired in 12 seconds, do ONE clean
+        // restart with a proper delay so iOS can fully release the session.
+        muteRetryCount++;
+        const watchdog = setTimeout(function () {
+          logEvent("unmute watchdog fired, doing single clean restart");
           if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
           if (ctx) { try { ctx.close(); } catch (e2) {} }
           timer = null; stream = null; ctx = null;
           startBtn.disabled = false; stopBtn.disabled = true;
-          autoRetried = false;
-          setTimeout(function () { startListening(); }, 2000);
-        } else {
-          setStatus("Microphone held by another app. Close other apps and try again.");
-          speak("Microphone held by another app. Close other apps and try again.");
-          logEvent("mute retry limit reached");
-        }
+          autoRetried = false; useCleanInput = true;
+          setStatus("Microphone did not come back. Tap Start listening to try again.");
+          speak("Microphone did not come back. Tap Start listening.");
+        }, 12000);
+        // Cancel the watchdog if unmute fires.
+        trk.addEventListener("unmute", function () { clearTimeout(watchdog); }, { once: true });
       });
       trk.addEventListener("unmute", function () {
-        setStatus("Microphone unmuted.");
-        speak("Microphone unmuted.");
         logEvent("track event: unmute");
-        // Claudette's fix (issue #4): when iOS finally opens the
-        // session, rebuild the analyser path so the new audio
-        // actually flows, instead of trusting the old graph.
+        // iOS returned the audio session. Rebuild the analyser graph
+        // so fresh audio flows, then restart the tick loop.
         try {
           if (ctx && ctx.state === "suspended" && ctx.resume) ctx.resume();
           if (src && analyser && silentGain) {
@@ -474,30 +474,25 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
             logEvent("analyser restarted on unmute");
           }
         } catch (e) { logEvent("analyser restart on unmute failed: " + e.message); }
+        setStatus("Microphone back. Listening… play a string.");
+        speak("Microphone back. Play a string.");
+        if (!timer) timer = setInterval(tick, 100);
+        startBtn.disabled = true;
+        stopBtn.disabled = false;
       });
       // If the track starts gagged, tear it down and ask once more
       // without making the user tap anything: a fresh request
       // sometimes comes back ungagged.
       if (trk.muted) {
-        logEvent("track muted at startup, muteRetryCount=" + muteRetryCount);
-        if (muteRetryCount < 5) {
-          muteRetryCount++;
-          const attempt = muteRetryCount;
-          setStatus("Microphone busy. Retrying (" + attempt + " of 5)…");
-          speak("Microphone busy. Retrying.");
-          logEvent("auto-retry on startup mute, attempt " + attempt);
-          if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
-          if (ctx) { try { ctx.close(); } catch (e2) {} }
-          timer = null; stream = null; ctx = null;
-          stopBtn.disabled = true; startBtn.disabled = false;
-          autoRetried = false;
-          setTimeout(function () { startListening(); }, 2000);
-        } else {
-          setStatus("Microphone busy. Close other apps and try again.");
-          speak("Microphone held by another app. Close other apps and try again.");
-          logEvent("startup mute retry limit reached");
-        }
-        return;
+        logEvent("track muted at startup — waiting for unmute event");
+        // Don't retry with a new getUserMedia: calling it again while
+        // this stream is alive will mute the new track too. Wait for
+        // iOS to hand the session back via the unmute event, then the
+        // unmute handler below will rebuild the analyser graph.
+        setStatus("Microphone is busy. Waiting for it to free up…");
+        speak("Microphone is busy. Waiting.");
+        // Fall through — the unmute listener is added below and will
+        // restart the analyser when the session is returned.
       }
     } catch (e) { logEvent("mute listeners unavailable: " + e.message); }
     // Safari only renders the graph if it reaches the destination.
@@ -544,7 +539,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     const track = stream.getAudioTracks()[0];
     const state = track ? ("track " + track.readyState + ", muted " + track.muted) : "no mic track";
     const micName = track && track.label ? track.label : "unknown microphone";
-    const msg = "Build 17. Peak level " + peakRms.toFixed(4) + ". Context " + (ctx ? ctx.state : "none") + ". " + state + ". Microphone: " + micName + ". Clean input: " + useCleanInput + ". Mute retries: " + muteRetryCount + ".";
+    const msg = "Build 18. Peak level " + peakRms.toFixed(4) + ". Context " + (ctx ? ctx.state : "none") + ". " + state + ". Microphone: " + micName + ". Clean input: " + useCleanInput + ".";
     setStatus(msg);
     speak(msg);
     logEvent("level check: " + msg);
