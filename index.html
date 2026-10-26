@@ -26,7 +26,7 @@ phone. Nothing is sent anywhere.</p>
   <button id=”copyLink” aria-label=”Copy tuner link”>Copy tuner link</button>
   <button id=”openSafari” aria-label=”Open in Safari”>Open in Safari</button>
 </p>
-<p class=”note” id=”buildTag”>Talking Tuner, build 19.</p>
+<p class=”note” id=”buildTag”>Talking Tuner, build 20.</p>
 <p>
   <button id="guitarBtn" aria-label="Guitar" aria-pressed="true">Guitar</button>
   <button id="ukeBtn" aria-label="Tenor ukulele" aria-pressed="false">Tenor ukulele</button>
@@ -238,7 +238,7 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
       }).catch(function () {});
     } catch (e) {}
   }
-  logEvent("page loaded, build 19, " + navigator.userAgent);
+  logEvent("page loaded, build 20, " + navigator.userAgent);
   remoteLog("page loaded, build 19, " + navigator.userAgent);
 
   function setStatus(text) { statusEl.textContent = text; }
@@ -388,11 +388,23 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     try {
       ctx = new (window.AudioContext || window.webkitAudioContext)();
       if (ctx.resume) ctx.resume();
-      // Claudette's fix (issue #4): iOS suspends the context on any
-      // interruption, so resume it whenever it suspends.
       const thisCtx = ctx;
+      // Watch every AudioContext state change. On iOS, VoiceOver
+      // speaking causes "interrupted"; when it stops, ctx goes back
+      // to "running". Start (or restart) the tick loop the moment
+      // both the context is running AND the track is unmuted.
       ctx.addEventListener("statechange", function () {
-        if (thisCtx.state === "suspended" && thisCtx.resume) thisCtx.resume();
+        logEvent("ctx statechange: " + thisCtx.state);
+        remoteLog("ctx statechange: " + thisCtx.state);
+        if (thisCtx.state === "suspended") {
+          if (thisCtx.resume) thisCtx.resume();
+        } else if (thisCtx.state === "interrupted") {
+          if (timer) { clearInterval(timer); timer = null; }
+          logEvent("ctx interrupted — pausing tick");
+          remoteLog("ctx interrupted — pausing tick");
+        } else if (thisCtx.state === "running") {
+          maybeStartTick();
+        }
       });
       analyser = ctx.createAnalyser();
       analyser.fftSize = 4096;
@@ -485,12 +497,11 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
       trk.addEventListener("unmute", function () {
         logEvent("track event: unmute");
         remoteLog("track UNMUTED, ctx=" + (ctx ? ctx.state : "none"));
-        // iOS returned the audio session. Rebuild the analyser graph
-        // so fresh audio flows, then restart the tick loop.
+        // Rebuild the analyser graph so fresh audio flows through.
         try {
-          if (ctx && ctx.state === "suspended" && ctx.resume) ctx.resume();
+          if (ctx && ctx.resume) ctx.resume();
           if (src && analyser && silentGain) {
-            try { analyser.disconnect(); } catch (e) {}
+            try { analyser.disconnect(); } catch (e2) {}
             analyser = ctx.createAnalyser();
             analyser.fftSize = 4096;
             src.disconnect();
@@ -498,13 +509,12 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
             analyser.connect(silentGain);
             recent = [];
             logEvent("analyser restarted on unmute");
+            remoteLog("analyser restarted on unmute");
           }
         } catch (e) { logEvent("analyser restart on unmute failed: " + e.message); }
-        setStatus("Microphone back. Listening… play a string.");
-        speak("Microphone back. Play a string.");
-        if (!timer) timer = setInterval(tick, 100);
-        startBtn.disabled = true;
-        stopBtn.disabled = false;
+        // Let maybeStartTick decide whether we're ready — ctx might
+        // still be interrupted even though the track unmuted.
+        maybeStartTick();
       });
       // If the track starts gagged, tear it down and ask once more
       // without making the user tap anything: a fresh request
@@ -534,9 +544,34 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
     repeatCount = 0;
     listenStartedAt = Date.now(); heardSound = false; silenceAnnounced = false; noPitchAnnounced = false;
     peakRms = 0;
+    // Only start ticking if the audio session is actually available
+    // right now. If VoiceOver is speaking (ctx=interrupted) or the
+    // track is muted, wait — the statechange/unmute handlers will
+    // call maybeStartTick() when both conditions clear.
+    maybeStartTick();
+    if (!timer) {
+      setStatus("Microphone ready. Waiting for audio session to clear…");
+      speak("Ready. Waiting for audio session.");
+      remoteLog("startListening: tick deferred, ctx=" + (ctx ? ctx.state : "none") +
+        ", muted=" + (stream && stream.getAudioTracks()[0] ? stream.getAudioTracks()[0].muted : "?"));
+    }
+  }
+  // Start the tick loop only when both the AudioContext is running
+  // and the mic track is unmuted. Safe to call multiple times —
+  // exits immediately if the loop is already going or conditions
+  // aren't met yet.
+  function maybeStartTick() {
+    if (timer) return;
+    if (!stream) return;
+    const trk = stream.getAudioTracks && stream.getAudioTracks()[0];
+    if (!trk || trk.readyState !== "live") return;
+    if (!ctx || ctx.state !== "running") { remoteLog("maybeStartTick deferred: ctx=" + (ctx ? ctx.state : "none")); return; }
+    if (trk.muted) { remoteLog("maybeStartTick deferred: track muted"); return; }
+    logEvent("maybeStartTick: starting tick loop");
+    remoteLog("maybeStartTick: STARTING tick loop");
+    timer = setInterval(tick, 100);
     setStatus("Listening… play a string.");
     speak("Listening. Play a string.");
-    timer = setInterval(tick, 100);
     startBtn.disabled = true;
     stopBtn.disabled = false;
   }
