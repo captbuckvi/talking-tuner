@@ -23,13 +23,10 @@ is low or high, for example “low E string, low”. When the string
 comes in tune, the phone dings and says so. Everything runs on the
 phone. Nothing is sent anywhere.</p>
 <p>
-  <button id="copyLink" aria-label="Copy tuner link">Copy tuner link</button>
+  <button id=”copyLink” aria-label=”Copy tuner link”>Copy tuner link</button>
+  <button id=”openSafari” aria-label=”Open in Safari”>Open in Safari</button>
 </p>
-<p class="note">If this page opened inside another app and the tuner cannot
-hear you, tap Copy tuner link, then say “Hey Siri, open Safari”,
-tap the address bar, and choose Paste and Go. The tuner needs real
-Safari to hear the microphone.</p>
-<p class="note" id="buildTag">Talking Tuner, build 14.</p>
+<p class=”note” id=”buildTag”>Talking Tuner, build 15.</p>
 <p>
   <button id="guitarBtn" aria-label="Guitar" aria-pressed="true">Guitar</button>
   <button id="ukeBtn" aria-label="Tenor ukulele" aria-pressed="false">Tenor ukulele</button>
@@ -435,9 +432,8 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
         timer = null; stream = null; ctx = null;
         stopBtn.disabled = true;
         startBtn.disabled = false;
-        setStatus("Microphone muted by the system, retrying.");
-        speak("Microphone muted by the system, retrying.");
-        startListening();
+        setStatus("Microphone muted. If this opened inside an app, tap Open in Safari.");
+        speak("Microphone muted. If this page opened inside another app, tap Open in Safari.");
         return;
       }
     } catch (e) { logEvent("mute listeners unavailable: " + e.message); }
@@ -565,6 +561,32 @@ The microphone only works on a secure page, so open this over HTTPS.</p>
       speak("Copy failed.");
     }
   });
+
+  // Open in Safari button: uses the safari-https:// URL scheme to jump
+  // directly to real Safari from within an in-app browser. Much easier
+  // with VoiceOver than copy-paste. Falls back to copying the link if
+  // the scheme is unavailable (non-iOS or desktop).
+  const openSafariBtn = document.getElementById("openSafari");
+  openSafariBtn.addEventListener("click", function () {
+    const url = window.location.href;
+    const safariUrl = url.replace(/^https:\/\//, "safari-https://").replace(/^http:\/\//, "safari-http://");
+    speak("Opening in Safari.");
+    window.location.href = safariUrl;
+  });
+
+  // After a short delay, auto-announce if the mic is muted so Buck
+  // knows to use "Open in Safari" before he even taps Start.
+  setTimeout(function () {
+    if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
+      navigator.mediaDevices.enumerateDevices().then(function (devices) {
+        const hasMic = devices.some(function (d) { return d.kind === "audioinput"; });
+        if (!hasMic) {
+          setStatus("No microphone found. If this page opened inside another app, tap Open in Safari.");
+          speak("No microphone found. Tap Open in Safari to use the tuner.");
+        }
+      }).catch(function () {});
+    }
+  }, 1500);
 </script>
 </body>
 </html>
